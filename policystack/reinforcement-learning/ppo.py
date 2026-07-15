@@ -1,0 +1,156 @@
+import torch
+import torch.nn as nn
+from torch.distributions import Normal, Categorical
+from torch.utils.data import DataLoader
+
+from config import PPOConfig
+from utils.containers import Rollout
+from math.advantage import gae
+from math.objective import clipped_surrogate_objective, ac_critic_loss
+
+from typing import Tuple
+
+
+class Trainer(nn.Module):
+    """
+    high-level ppo training handler
+    
+    may also be used during inference
+    """
+    def __init__(self, config: PPOConfig) -> None:
+        super().__init__()
+        self.config = config
+        self.policy = Actor(config.actor)
+        self.critic = Critic(config.critic)
+        
+        
+    def __call__(self, obs: torch.Tensor, raw_distribution: bool = False) -> torch.Tensor:
+        return super().__call__(obs, raw_distribution)
+    
+    
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        cont_dist, disc_dist = self.policy.forward(obs)
+        # calling the trainer's forward will return high-level usable action values
+        cont_actions = cont_dist.sample()
+        disc_actions = disc_dist.sample()
+        # concatenate and return
+        return torch.cat([cont_actions, disc_actions], dim=-1)
+    
+    
+    def train(self) -> None:
+        env = self.config.environment
+        # instanciate rollout
+        rollout = Rollout(stackable=["obs", "actions", "log_probs", "rewards", "values", "dones", "advantages"])
+        for iteration in range(self.config.iterations):
+            # data collection phase
+            # collect an initial observation
+            obs, _ = env.reset()
+            # reset rollout
+            rollout.reset({"obs": obs})
+            
+            while len(rollout) < self.config.rollout_length:
+                # compute and sample action
+                dist = self.policy(obs)
+                # sample action from distribution
+                action = dist.sample()
+                log_prob = dist.log_prob(action)
+                # derive critic's expected value
+                expected_value = self.critic(obs)
+                
+                obs, reward, term, trunc, _ = env.step(action)
+                done = term | trunc
+                # compute advantage and tie it to the greater transition
+                advantage = gae(
+                    rewards=reward, 
+                    expected_values=expected_value, 
+                    dones=done, 
+                    discount_factor=self.config.discount_factor,
+                    gae_decay=self.config.gae_decay,
+                )
+                # log transition
+                rollout.add(items={
+                    "obs": obs, "actions": action, "log_probs": log_prob, "rewards": reward, 
+                    "values": expected_value, "dones": done, "advantages": advantage,
+                })
+                
+            # training phase
+            # batch rollout
+            dataloader = DataLoader(
+                dataset=rollout, 
+                batch_size=self.config.batch_size,
+                shuffle=True,
+            )
+            for epoch in self.config.epochs:
+                for batch in dataloader:
+                    
+                    # update policy
+                    self.config.actor_op.zero_grad()
+                    # compute current distributions
+                    log_probs = self.policy(batch["obs"]).log_prob(batch["actions"])
+                    act_loss = clipped_surrogate_objective(
+                        log_prob=log_probs,
+                        old_log_prob=batch["log_prob"],
+                        advantage=batch["advantage"],
+                        clipping_parameter=self.config.clipping_parameter,
+                    )
+                    act_loss.backward()
+                    self.config.actor_op.step()
+                    
+                    # update critic
+                    self.config.critic_op.zero_grad()
+                    # compute new expected values
+                    values = self.critic(batch["obs"])
+                    crit_loss = ac_critic_loss(
+                        expected_value=values,
+                        old_expected_value=batch["values"],
+                        advantage=batch["advantages"]
+                    )
+                    crit_loss.backward()
+                    self.config.critic_op.step()
+
+
+
+class Actor(nn.Module):
+    """
+    policy function
+    """
+    def __init__(self, network: nn.Module) -> None:
+        super().__init__()
+        self.network = network
+        
+        
+    def __call__(self, obs: torch.Tensor, sample: bool = False) -> Normal:
+        return super().__call__(obs)
+        
+        
+    def forward(self, obs: torch.Tensor) -> Normal:
+        """
+        predict the optimal single-state action in the form of a gaussian distribution for each continous action field (e.g. the position of a joint)
+        currently, only continuous actions are supported
+        """
+        out = self.network(obs) # (B, N*2)
+        # convert to distributions
+        mean, logstd = torch.chunk(out, chunks=2, dim=-1)
+        return Normal(mean, torch.exp(logstd))
+            
+          
+            
+class Critic(nn.Module):
+    """
+    value function
+    """
+    def __init__(self, network: nn.Module) -> None:
+        super().__init__()
+        self.network = network
+        
+    
+    def __call__(self, obs: torch.Tensor) -> torch.Tensor:
+        return super().__call__(obs)
+    
+    
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        """
+        predict the cumulative (discounted) value of the twin policy given the current state
+        """
+        out = self.network(obs)
+        return out # (B, 1)
