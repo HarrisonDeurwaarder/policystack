@@ -3,12 +3,13 @@ import torch.nn as nn
 
 
 def gae(
-        rewards: torch.Tensor,
-        expected_values: torch.Tensor,
-        dones: torch.Tensor,
-        discount_factor: float,
-        gae_decay: float,
-    ) -> torch.Tensor:
+    rewards: torch.Tensor,
+    expected_values: torch.Tensor,
+    dones: torch.Tensor,
+    discount_factor: float,
+    gae_decay: float,
+    **kwargs
+) -> torch.Tensor:
     """
     compute generalized advantage estimates
 
@@ -40,6 +41,7 @@ def td_residual(
     expected_values: torch.Tensor,
     dones: torch.Tensor,
     discount_factor: float,
+    **kwargs
 ) -> torch.Tensor:
     """
     Computes the TD residual advantages
@@ -66,7 +68,8 @@ def monte_carlo(
     rewards: torch.Tensor,
     expected_values: torch.Tensor,
     dones: torch.Tensor,
-    discount_factor: float
+    discount_factor: float,
+    **kwargs
 ) -> torch.Tensor:
     """
     Computes the monte carlo advantages

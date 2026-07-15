@@ -6,9 +6,9 @@ from torch.utils.data import DataLoader
 from config import PPOConfig
 from utils.containers import Rollout
 from math.advantage import gae
-from math.objective import clipped_surrogate_objective, ac_critic_loss
+from math.objective import clipped_surrogate_objective, critic_mse
 
-from typing import Tuple
+from typing import Tuple, Any
 
 
 class Trainer(nn.Module):
@@ -36,10 +36,39 @@ class Trainer(nn.Module):
         return cont_actions
     
     
+    def update(self, batch: dict[str, Any]) -> None:
+        # update policy
+        self.config.actor_op.zero_grad()
+        # compute current distributions
+        log_probs = self.policy(batch["obs"]).log_prob(batch["actions"])
+        act_loss = self.config.policy_objective_fn(
+            log_prob=log_probs,
+            old_log_prob=batch["log_probs"],
+            advantage=batch["advantages"],
+            entropy=batch["entropy"],
+            **self.config.policy_objective_params,
+        )
+        act_loss.backward()
+        self.config.actor_op.step()
+        
+        # update critic
+        self.config.critic_op.zero_grad()
+        # compute new expected values
+        values = self.critic(batch["obs"])
+        crit_loss = self.config.critic_loss_fn(
+            expected_value=values,
+            old_expected_value=batch["values"],
+            advantage=batch["advantages"],
+            **self.config.critic_loss_params,
+        )
+        crit_loss.backward()
+        self.config.critic_op.step()
+    
+    
     def train(self) -> None:
         env = self.config.environment
         # instanciate rollout
-        rollout = Rollout(stackable=["obs", "actions", "log_probs", "rewards", "values", "dones", "advantages"])
+        rollout = Rollout(stackable=["obs", "actions", "log_probs", "rewards", "values", "dones", "entropy"])
         for iteration in range(self.config.iterations):
             # data collection phase
             # collect an initial observation
@@ -53,6 +82,8 @@ class Trainer(nn.Module):
                 # sample action from distribution
                 action = dist.sample()
                 log_prob = dist.log_prob(action)
+                # compute entropy for entropy term
+                entropy = dist.entropy()
                 # derive critic's expected value
                 expected_value = self.critic(obs)
                 
@@ -62,15 +93,15 @@ class Trainer(nn.Module):
                 rollout.add(items={
                     "obs": obs, "actions": action, "log_probs": log_prob, 
                     "rewards": reward, "values": expected_value, "dones": done,
+                    "entropy": entropy,
                 })
             
             # compute advantages across rollout
-            advantages = gae(
+            advantages = self.config.advantage_fn(
                 rewards=rollout["rewards"], 
                 expected_values=rollout["values"], 
                 dones=rollout["dones"], 
-                discount_factor=self.config.discount_factor,
-                gae_decay=self.config.gae_decay,
+                **self.config.advantage_params,
             )
             rollout.annotate("advantages", advantages, container="stackable")
                 
@@ -83,31 +114,8 @@ class Trainer(nn.Module):
             )
             for epoch in range(self.config.epochs):
                 for batch in dataloader:
-                    
-                    # update policy
-                    self.config.actor_op.zero_grad()
-                    # compute current distributions
-                    log_probs = self.policy(batch["obs"]).log_prob(batch["actions"])
-                    act_loss = clipped_surrogate_objective(
-                        log_prob=log_probs,
-                        old_log_prob=batch["log_probs"],
-                        advantage=batch["advantages"],
-                        clipping_parameter=self.config.clipping_parameter,
-                    )
-                    act_loss.backward()
-                    self.config.actor_op.step()
-                    
-                    # update critic
-                    self.config.critic_op.zero_grad()
-                    # compute new expected values
-                    values = self.critic(batch["obs"])
-                    crit_loss = ac_critic_loss(
-                        expected_value=values,
-                        old_expected_value=batch["values"],
-                        advantage=batch["advantages"]
-                    )
-                    crit_loss.backward()
-                    self.config.critic_op.step()
+                    # distribute update logic
+                    self.update(batch)
 
 
 

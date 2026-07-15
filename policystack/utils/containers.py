@@ -76,7 +76,7 @@ class Rollout(Dataset):
             else:                           self.stackables[key].append(element)
             
             
-    def annotate(self, id: str, column: list, container: Literal["stackable", "sequential", "opaque"]) -> None:
+    def annotate(self, id: str, column: list, container: Literal["stackable", "sequential", "opaque"] = "stackable") -> None:
         # error if lengths are mismatched
         if self.__len__() != len(column):
             raise ValueError(f"expected column of length {self.__len__()}, got {len(column)}")

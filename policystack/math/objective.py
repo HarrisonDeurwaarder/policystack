@@ -7,7 +7,7 @@ def clipped_surrogate_objective(
     log_prob: torch.Tensor,
     old_log_prob: torch.Tensor,
     advantage: torch.Tensor,
-    clipping_parameter: float,
+    clipping_param: float = 0.2,
     **kwargs
 ) -> torch.Tensor:
     """
@@ -17,7 +17,7 @@ def clipped_surrogate_objective(
         log_prob (torch.Tensor): log probability of the chosen action being chosen in the current policy (B, 1)
         old_log_prob (torch.Tensor): log probability of the chosen action being chosen in the old policy (B, 1)
         advantage (torch.Tensor): benefit of the policy's choice over what was expected by the critic (B, 1)
-        clipping_parameter (float): amount of deviation from the old policy (expressed as a ratio of probabilities) that is accepted
+        clipping_param (float): amount of deviation from the old policy (expressed as a ratio of probabilities) that is accepted
         
     Returns:
         torch.Tensor: the objective (B, 1)
@@ -33,13 +33,28 @@ def clipped_surrogate_objective(
     objective = torch.min(
         advantage * ratio,
         advantage * torch.clip(
-            ratio, 1 - clipping_parameter, 1 + clipping_parameter
+            ratio, 1 - clipping_param, 1 + clipping_param
         )
     )
     return objective.mean() # reduce to scalar
+
+
+def clipped_surrogate_with_entropy(
+    log_prob: torch.Tensor,
+    old_log_prob: torch.Tensor,
+    advantage: torch.Tensor,
+    entropy: float,
+    clipping_param: float = 0.2,
+    entropy_coef: float = 0.01,
+    **kwargs
+) -> torch.Tensor:
+    objective = clipped_surrogate_objective(
+        log_prob=log_prob, old_log_prob=old_log_prob, advantage=advantage, clipping_param=clipping_param
+    )
+    # add the entropy term
+    return objective + torch.mean(entropy_coef * entropy)
     
-    
-def ac_critic_loss(
+def critic_mse(
     expected_value: torch.Tensor,
     old_expected_value: torch.Tensor,
     advantage: torch.Tensor,
