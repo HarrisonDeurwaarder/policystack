@@ -29,7 +29,7 @@ def gae(
     # recursive monte carlo component (low bias)
     # computes the discounted value of a finite episode directly
     advantages = torch.zeros_like(expected_values) # an additional dimension is added to ease code complexity
-    for t in range(rewards.size(-1), -1, -1): # iterate backwards from T to 0, inclusive
+    for t in range(rewards.size(-1) - 1, -1, -1): # iterate backwards from T to 0, inclusive
         advantages[..., t] = td_residual[..., t] + discount_factor * gae_decay * advantages[..., t+1]
         
-    return advantages
+    return advantages[..., :-1]

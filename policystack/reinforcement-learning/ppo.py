@@ -24,17 +24,16 @@ class Trainer(nn.Module):
         self.critic = Critic(config.critic)
         
         
-    def __call__(self, obs: torch.Tensor, raw_distribution: bool = False) -> torch.Tensor:
-        return super().__call__(obs, raw_distribution)
+    def __call__(self, obs: torch.Tensor) -> torch.Tensor:
+        return super().__call__(obs)
     
     
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        cont_dist, disc_dist = self.policy.forward(obs)
+        cont_dist = self.policy.forward(obs)
         # calling the trainer's forward will return high-level usable action values
         cont_actions = cont_dist.sample()
-        disc_actions = disc_dist.sample()
         # concatenate and return
-        return torch.cat([cont_actions, disc_actions], dim=-1)
+        return cont_actions
     
     
     def train(self) -> None:
@@ -80,7 +79,7 @@ class Trainer(nn.Module):
                 batch_size=self.config.batch_size,
                 shuffle=True,
             )
-            for epoch in self.config.epochs:
+            for epoch in range(self.config.epochs):
                 for batch in dataloader:
                     
                     # update policy
@@ -89,8 +88,8 @@ class Trainer(nn.Module):
                     log_probs = self.policy(batch["obs"]).log_prob(batch["actions"])
                     act_loss = clipped_surrogate_objective(
                         log_prob=log_probs,
-                        old_log_prob=batch["log_prob"],
-                        advantage=batch["advantage"],
+                        old_log_prob=batch["log_probs"],
+                        advantage=batch["advantages"],
                         clipping_parameter=self.config.clipping_parameter,
                     )
                     act_loss.backward()

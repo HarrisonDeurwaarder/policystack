@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 
-from typing import List, Any
+from typing import List, Any, Literal
 
 
 class Rollout(Dataset):
@@ -74,6 +74,26 @@ class Rollout(Dataset):
             if key in self.stackable_ids:   self.stackables[key].append(element)
             elif key in self.stackable_ids: self.stackables[key].append(element)
             else:                           self.stackables[key].append(element)
+            
+            
+    def annotate(self, id: str, column: list, container: Literal["stackable", "sequential", "opaque"]) -> None:
+        # error if lengths are mismatched
+        if self.__len__() != len(column):
+            raise ValueError(f"expected column of length {self.__len__()}, got {len(column)}")
+        # error if an invalid container is passed
+        if not container in ["stackable", "sequential", "opaque"]:
+            raise ValueError(f"expected container to be one of 'stackable', 'sequential', or 'opaque', got {container}")
+
+        # match column to correct container
+        if container == "stackable":
+            self.stackable_ids.append(id)
+            self.stackables[id] = column
+        elif container == "sequential":
+            self.sequential_ids.append(id)
+            self.sequentials[id] = column
+        else:
+            self.opaque_ids.append(id)
+            self.opaques[id] = column
             
        
     def collate(self, batch: List[dict[str, Any]]) -> dict[str, Any]:

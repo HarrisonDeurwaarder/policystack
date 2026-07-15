@@ -4,11 +4,12 @@ import torch.nn.functional as F
 
 
 def clipped_surrogate_objective(
-        log_prob: torch.Tensor,
-        old_log_prob: torch.Tensor,
-        advantage: torch.Tensor,
-        clipping_parameter: float,
-    ) -> torch.Tensor:
+    log_prob: torch.Tensor,
+    old_log_prob: torch.Tensor,
+    advantage: torch.Tensor,
+    clipping_parameter: float,
+    **kwargs
+) -> torch.Tensor:
     """
     compute the policy objective at a state for PPO
     
@@ -23,9 +24,7 @@ def clipped_surrogate_objective(
     """
     # ratio between current policy and frozen policy aids in preventing excessive updates
     # logarithmic properties are used to smooth computations for extremely small probabilities
-    ratio = torch.exp(
-        torch.log(log_prob) - torch.log(old_log_prob)
-    )
+    ratio = torch.exp(log_prob - old_log_prob)
     # consider the benefits of the clipped surrogate objective in four cases
     # advantage is positive, ratio is clipped above 1 + epsilon: rate at which this good action is encouraged is limited to prevent a catastrophically large update
     # advantage is positive, ratio is clipped below 1 - epsilon: rate at which this good action is taken is limited currently and should be more common (i.e. policy can catch up)
@@ -34,16 +33,17 @@ def clipped_surrogate_objective(
     objective = torch.min(
         advantage * ratio,
         advantage * torch.clip(
-            ratio, 1 + clipping_parameter, 1 - clipping_parameter
+            ratio, 1 - clipping_parameter, 1 + clipping_parameter
         )
     )
-    return objective
+    return objective.mean() # reduce to scalar
     
     
 def ac_critic_loss(
     expected_value: torch.Tensor,
     old_expected_value: torch.Tensor,
     advantage: torch.Tensor,
+    **kwargs
 ) -> torch.Tensor:
     """
     compute the value loss at a state for AC algorithms
