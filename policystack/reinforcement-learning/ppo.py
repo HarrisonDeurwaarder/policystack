@@ -58,19 +58,21 @@ class Trainer(nn.Module):
                 
                 obs, reward, term, trunc, _ = env.step(action)
                 done = term | trunc
-                # compute advantage and tie it to the greater transition
-                advantage = gae(
-                    rewards=reward, 
-                    expected_values=expected_value, 
-                    dones=done, 
-                    discount_factor=self.config.discount_factor,
-                    gae_decay=self.config.gae_decay,
-                )
                 # log transition
                 rollout.add(items={
-                    "obs": obs, "actions": action, "log_probs": log_prob, "rewards": reward, 
-                    "values": expected_value, "dones": done, "advantages": advantage,
+                    "obs": obs, "actions": action, "log_probs": log_prob, 
+                    "rewards": reward, "values": expected_value, "dones": done,
                 })
+            
+            # compute advantages across rollout
+            advantages = gae(
+                rewards=rollout["rewards"], 
+                expected_values=rollout["values"], 
+                dones=rollout["dones"], 
+                discount_factor=self.config.discount_factor,
+                gae_decay=self.config.gae_decay,
+            )
+            rollout.annotate("advantages", advantages, container="stackable")
                 
             # training phase
             # batch rollout
@@ -118,7 +120,7 @@ class Actor(nn.Module):
         self.network = network
         
         
-    def __call__(self, obs: torch.Tensor, sample: bool = False) -> Normal:
+    def __call__(self, obs: torch.Tensor) -> Normal:
         return super().__call__(obs)
         
         
