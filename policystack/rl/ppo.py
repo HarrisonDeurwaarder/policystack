@@ -1,14 +1,17 @@
 import torch
 import torch.nn as nn
+import torch.optim as optim
 from torch.distributions import Normal, Categorical
 from torch.utils.data import DataLoader
 
-from config import PPOConfig
-from policystack.utils.buffers import Rollout
+from config import DynamicTerm, resolve
+from utils.buffers import Rollout
 from math.advantage import gae
-from math.objective import clipped_surrogate_objective, critic_mse
+from math.objective import clipped_surrogate_with_entropy, critic_mse
+from training import TrainingState, OnPolicyACTrainer
 
-from typing import Tuple, Any
+from typing import Tuple, Any, Callable
+from dataclasses import dataclass, field, MISSING
 
 
 
@@ -44,18 +47,62 @@ class PPO(nn.Module):
 
 
 
-class PPOTrainer():
+class PPOTrainer(OnPolicyACTrainer):
     """
     high-level ppo training handler
     """
-    def __init__(self, config: PPOConfig, ppo: PPO) -> None:
-        super().__init__()
-        self.config = config
-        self.ppo = ppo
+    def _pre_training(self) -> None:
+        # instanciate rollout
+        self.rollout = Rollout(stackable=["obs", "actions", "log_probs", "rewards", "values", "next_values", "dones", "entropy"])
+        
+        
+    def _pre_collection(self) -> None:
+        obs, _ = self.env.reset()
+        value = self.ppo.get_value(obs)
+        self.rollout.reset()
+        self.rollout.stage(fields={"obs": obs, "values": value})
+        
+        
+    def _collect_transition(self) -> None:
+        # compute and sample action
+        obs = self.rollout.from_staged("obs")
+        value = self.rollout.from_staged("obs")
+        action, dist = self.ppo(obs)
+        log_prob = dist.log_prob(action)
+        # compute entropy for entropy term
+        entropy = dist.entropy()
+        
+        next_obs, reward, term, trunc, _ = self.env.step(action)
+        # compute critic value for next state
+        next_value = self.ppo.get_value(next_obs)
+        done = term | trunc
+        # compute the next expected value for advantage comps
+        # log transition
+        self.rollout.stage(fields={
+            "actions": action, "log_probs": log_prob, 
+            "rewards": reward, "values": value, "next_values": next_value, 
+            "dones": done, "entropy": entropy
+        })
+        # obs have already been added; by staging everything else, we now have a full transition
+        self.rollout.commit()
+        # stage the obs for the next cycle
+        # as a result, an additional obs remains in the buffer after collection
+        # this is eliminated when rollout.reset() is called
+        self.rollout.stage(fields={"obs": next_obs, "values": next_value})
+        
+        
+    def _pre_learning(self) -> None:
+         # compute advantages across rollout
+        advantages = self.config.advantage_fn(
+            rewards=self.rollout.rewards, 
+            expected_values=self.rollout.values, 
+            dones=self.rollout.dones, 
+            **self.config.advantage_params,
+        )
+        self.rollout.annotate("advantages", advantages)
+        
     
-    
-    def update(self, batch: dict[str, Any]) -> None:
-        """perform a single-batch gradient update on the actor/critic"""
+    def _gradient_update(self, batch):
         # update policy
         self.config.actor_op.zero_grad()
         # compute current distributions
@@ -83,55 +130,56 @@ class PPOTrainer():
         )
         crit_loss.backward()
         self.config.critic_op.step()
+
+
+
+@dataclass
+class PPOConfig(Config):
+    """
+    Config template for PPO
+    """
+    # network architecture parameters
+    # for the state-action function, the return value of forward() must
+    # be keyed {"continuous": ..., "discrete": ...}
+    # else, all actions will be assumed to be continous and may impose downstream errors
+    actor: nn.Module
+    critic: nn.Module
+    # assumes that actor/critic are trained seperately
+    # i.e. no shared backbone
+    actor_op: optim.Optimizer # note that learning rate scheduling is done within the optimizers; other curriculum
+    critic_op: optim.Optimizer
     
+    # enviornment must follow gymnassium convention
+    # step(action) -> (obs, reward, term, trunc, info)
+    # reset(seed=None) -> (obs, info)
+    environment = field(default=MISSING)
     
-    def train(self) -> None:
-        """train the policy using a given number of iterations"""
-        env = self.config.environment
-        # instanciate rollout
-        rollout = Rollout(stackable=["obs", "actions", "log_probs", "rewards", "values", "dones", "entropy"])
-        for iteration in range(self.config.iterations):
-            # data collection phase
-            # collect an initial observation
-            obs, _ = env.reset()
-            # reset rollout
-            rollout.reset({"obs": obs})
-            
-            while len(rollout) < self.config.rollout_length:
-                # compute and sample action
-                action, dist = self.ppo(obs)
-                log_prob = dist.log_prob(action)
-                # compute entropy for entropy term
-                entropy = dist.entropy()
-                # derive critic's expected value
-                expected_value = self.ppo.get_value(obs)
-                
-                obs, reward, term, trunc, _ = env.step(action)
-                done = term | trunc
-                # log transition
-                rollout.add(items={
-                    "obs": obs, "actions": action, "log_probs": log_prob, 
-                    "rewards": reward, "values": expected_value, "dones": done,
-                    "entropy": entropy,
-                })
-            
-            # compute advantages across rollout
-            advantages = self.config.advantage_fn(
-                rewards=rollout["rewards"], 
-                expected_values=rollout["values"], 
-                dones=rollout["dones"], 
-                **self.config.advantage_params,
-            )
-            rollout.annotate("advantages", advantages, container="stackable")
-                
-            # training phase
-            # batch rollout
-            dataloader = DataLoader(
-                dataset=rollout, 
-                batch_size=self.config.batch_size,
-                shuffle=True,
-            )
-            for epoch in range(self.config.epochs):
-                for batch in dataloader:
-                    # distribute update logic
-                    self.update(batch)
+    # number of times transitions from each rollout are iterated over
+    epochs: int | DynamicTerm = 10
+    # number of collect -> train cycles
+    iterations: int = 200
+    batch_size: int | DynamicTerm = 64
+    # number of steps collected in rollout phase
+    rollout_length: int | DynamicTerm = 1024
+    
+    # alloted ratio-difference between the target policy and trained policy
+    # prevents caatstrophic poicy collapse by limited the amount the policy can learn in on cycle
+    #clipping_param: float = 0.2
+    
+    policy_objective_fn: Callable = clipped_surrogate_with_entropy
+    advantage_fn: Callable = gae
+    critic_loss_fn: Callable = critic_mse
+    
+    policy_objective_params: dict[str, Any] = {
+        "clipping_param": 0.2, "entropy_coef": 0.01
+    }
+    advantage_params: dict[str, Any] = {
+        "discount_factor": 0.99, "gae_decay": 0.98
+    }
+    critic_loss_fn: dict[str, Any] = {}
+    
+    # enables the use of a single optimizer on a weighted sum of the policy and value objectives; use with a shared backbone
+    # otherwise, two 
+    #couple_objectives: bool = True
+    # compresses the range of designated variance outputs to (0, inf)
+    #exponentiate_variance: bool = True
