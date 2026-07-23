@@ -1,164 +1,135 @@
 import torch
+import torch.nn as nn
 from torch.utils.data import Dataset
-from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 
-from typing import List, Any, Literal
-from collections import deque
 from abc import ABC, abstractmethod
 
 
-@ABC
-class TransitionStorage(Dataset):
-    """
-    flexible transition storage for off-policy algorithms
-    """
+class TransitionBuffer(ABC):
+    """Abstract transition storage with flexible contents"""
+    
     def __init__(
         self, 
-        stackable: List[str], 
-        sequential: List[str], 
-        opaque: List[str]
+        batch_dims: tuple[int, ...], 
+        fields: dict[str, tuple[int, ...]], 
+        length: int
     ) -> None:
-        """
-        Args:
-            stackable (List[str]): ids of items which may be concatenated for batching (i.e. invariably-dimensioned tensors)
-            sequential (List[str]): ids of items which must be packed for batching (e.g. time-series tensors with variable dimensions)
-            opaque (List[str]): ids of items which must be returned as-is, in the list format they are stored for batching (i.e. non-tensors)
-        """
-        super().__init__()
-        # store ids for reference in 
-        self.stackable_ids, self.sequential_ids, self.opaque_ids = stackable, sequential, opaque
-        self.extra_ids = list()
-        
-        # complete method
-        # ...
+        # batch dims are necessary to create empty transitions of arbitrary dimensionality (e.g. B, E)
+        self.batch_dims = batch_dims
+        self.field_names = fields
+        self.fields = dict()
+        self.length = length
         
         
+    @abstractmethod
+    def __len__() -> int:
+        ...
+        
+    
+    @abstractmethod
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        ...
+        
+    
+    def __getattr__(self, name: str) -> torch.Tensor:
+        return self.fields[name]
+        
+    
+    def reset(self) -> None:
+        """Clear the buffer and all associated attributes"""
+        for field, shape in self.fields_names.items():
+            # fields will generally be of shape (B, E, field_dims..., length)
+            self.fields[field] = torch.zeros(self.batch_dims + shape + (self.length,))
+        self.index = 0
+        # transition fields for one step may be staged at different points before being commited to the buffer
+        self.staged = dict()
+        
+        
+    def stage(self, fields: dict[int, torch.Tensor]) -> None:
+        """Enables fields to be staged at different times before being commited upon .commit()"""
+        self.staged.update(fields)
+        
+        
+    def from_staged(self, field_name: str) -> torch.Tensor:
+        """Access a field from the temporary staged storage"""
+        return self.staged[field_name]
+        
+    
+    def commit(self) -> None:
+        """Pushes staged fields to the buffer; all fields must have been previously staged in order to commit"""
+        self.add(self.staged)
+        # empty staged fields
+        self.staged = dict()
+    
+    
+    def add(self, fields: dict[str, torch.Tensor]) -> None:
+        """Adds a new transition to the buffer"""
+        for field_name in self.field_names.keys():
+            self.fields[field_name][..., self.index] = fields[field_name] # copy the reference from the passed transition
+        # the next available index should be used
+        self.index += 1
+            
+    
+    def annotate(self, field_name: str, field: torch.Tensor) -> None:
+        """Annotate a new column to the buffer"""
+        # verify that the correct batch dimensions and length exist
+        shape = field.shape()
+        if shape[:len(self.batch_dims)] != self.batch_dims or shape[-1] != self.__len__():
+            raise ValueError(f"Expected field of leading shape {self.batch_dims} and trailing dimension {self.__len__()}, got {shape}")
+        # verify that field does not already exist
+        if field_name in self.fields.keys():
+            raise ValueError(f"Field {field_name} is already in buffer ({list(self.fields.keys())})")
+        
+        self.fields[field_name] = field
+        
+        
+        
+class Replay(TransitionBuffer):
+    """Replay buffer for off-policy transition storage; commonly stores 1mil+ transitions, overflow removes the oldest samples"""
+    def __len__(self,):
+        return self.length if self.has_overflown else self.index
+    
+    
+    def __getitem__(self, idx):
+        # DataLoader only batches using positive indices
+        # negative indicies should be more precise
+        if idx < 0:
+            idx = (idx + 1) % self.length
+        return super().__getitem__(idx)
+    
+    
+    def reset(self) -> None:
+        super().reset()
+        self.has_overflown = False
+        
+        
+    def add(self, fields: dict[str, torch.Tensor]) -> None:
+        super().add(fields)
+        # if increment overflowed, begin overriding buffer
+        if self.index >= self.length:
+            self.index = 0
+            self.has_overflown = True
+        
+
+
+class Rollout(TransitionBuffer):
+    """Rollout buffer for on-policy transition storage; commonly stores ~4096 transitions, must not overflow"""
     def __len__(self) -> int:
-        # find a valid list to defer to
-        if self.stackable_ids:    return len(self.stackables[self.stackable_ids[0]]) - int(self.stackable_ids[0] in self.extra_ids)
-        elif self.sequential_ids: return len(self.sequentials[self.sequential_ids[0]]) - int(self.sequential_ids[0] in self.extra_ids)
-        else:                     return len(self.opaques[self.opaque_ids[0]]) - int(self.opaque_ids[0] in self.extra_ids)
+        return self.index
     
     
-    def __getitem__(self, idx: int | str) -> dict[str, Any]:
-        # access by transition for batching (by integer indicies)
-        if isinstance(idx, int):
-            # merge all items
-            out = {key: self.stackables[key][idx] for key in self.stackable_ids}
-            out |= {key: self.sequentials[key][idx] for key in self.sequential_ids}
-            out |= {key: self.opaques[key][idx] for key in self.opaque_ids}
-            
-        # access by item type with string keys
-        else:
-            # find correct container
-            if idx in self.stackable_ids:    out = self.stackables[idx]
-            elif idx in self.sequential_ids: out = self.stackables[idx]
-            else:                            out = self.stackables[idx]
-            
-        return out
-            
-       
-    def collate(self, batch: List[dict[str, Any]]) -> dict[str, Any]:
-        # reformate from a list of dicts to a dict of lists
-        transformed_batch = {key: [sample[key] for sample in batch] for key in batch[0].keys()}
-        out = dict()
-        # handle vectorization
-        for key, items in transformed_batch.items():
-            
-            # stack all stackables
-            if key in self.stackable_ids:
-                out[key] = torch.stack(items)
-                
-            # pad all varianble-dimensioned elements
-            elif key in self.sequential_ids:
-                lengths = [s.size(0) for s in items] # (T_i, ...)
-                # pads all variable-length sequences to the same dimensionality
-                padded = pad_sequence(items, batch_first=True) # (B, T_max, ...)
-                # ensure no computation is done on the padding
-                packed = pack_padded_sequence(padded, lengths, batch_first=True)
-                out[key] = packed
-                
-            # opaque items are not handled internally
-            else:
-                out[key] = items
-                
-        return out
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        if idx < 0:
+            idx = self.index + (idx + 1) # intuitively handle negative indices
+        return super().__getitem__(idx)
     
     
-    def reset(self, items: dict[str, Any] = dict()) -> None:
-        """
-        clear all containers
-        """
-        # remake all containers
-        self.stackables, self.sequentials, self.opaques = (
-            self._process_keys(self.stackable_ids), self._process_keys(self.sequential_ids), self._process_keys(self.opaque_ids) # _process_keys() will be defined in subclasses
-        )
-        # add pre-rollout items
-        self.add(items)
-        # mark that the given ids correspond to items that are added +1 more than the length
-        self.extra_ids = list(items.keys())
-        
-        
-    def annotate(self, column: list | deque, container: Literal["stackable", "sequential", "opaque"]) -> None:
-        # error if lengths are mismatched
-        if self.__len__() != len(column):
-            raise ValueError(f"expected column of length {self.__len__()}, got {len(column)}")
-        # error if an invalid container is passed
-        if not container in ["stackable", "sequential", "opaque"]:
-            raise ValueError(f"expected container to be one of 'stackable', 'sequential', or 'opaque', got {container}")
-        
-        # match column to correct container
-        if container == "stackable":
-            self.stackable_ids.append(id)
-            self.stackables[id] = column
-        elif container == "sequential":
-            self.sequential_ids.append(id)
-            self.sequentials[id] = column
-        else:
-            self.opaque_ids.append(id)
-            self.opaques[id] = column
-        
+    def full(self) -> bool:
+        return self.index >= self.length
     
-    def add(self, items: dict[str, Any]) -> None:
-        for key, element in items.items():
-            # attempt to add to each collections
-            if key in self.stackable_ids:   self.stackables[key].append(element)
-            elif key in self.stackable_ids: self.stackables[key].append(element)
-            else:                           self.stackables[key].append(element)
-        
-        
-
-class Rollout(TransitionStorage):
     
-    def __init__(
-        self, 
-        stackable: list[str] = ["obs", "actions", "log_probs", "rewards", "values", "dones", "advantages"], 
-        sequential: list[str] = list(), 
-        opaque: list[str] = list()
-    ) -> None:
-        super().__init__(stackable, sequential, opaque)
-        # repeatable function call
-        self.process_keys = lambda keys: {key: list() for key in keys}
-        
-        
-    def annotate(self, column: list, container: Literal["stackable", "sequential", "opaque"] = "stackable") -> None: super().annotate(column, container)
-        
-        
-
-class Replay(TransitionStorage):
-    
-    def __init__(
-        self, 
-        stackable: list[str] = ["obs", "actions", "log_probs", "rewards", "values", "dones", "advantages"], 
-        sequential: list[str] = list(), 
-        opaque: list[str] = list(),
-        maxlen: int = 1e+6
-    ) -> None:
-        super().__init__(stackable, sequential, opaque)
-        # buffer size
-        self.maxlen = maxlen
-        # repeatable function call
-        self.process_keys = lambda keys: {key: deque(maxlen) for key in keys}
-        
-        
-    def annotate(self, column: deque, container: Literal["stackable", "sequential", "opaque"] = "stackable") -> None: super().annotate(column, container)
+    def add(self, fields: dict[str, torch.Tensor]) -> None:
+        # verify that capacity has not been reached
+        if self.full():
+            raise BufferError("Rollout is at capacity, failed to add excess transition")
+        super().add(fields)
