@@ -113,7 +113,7 @@ class Replay(TransitionBuffer):
 
 
 class Rollout(TransitionBuffer):
-    """Rollout buffer for on-policy transition storage; commonly stores ~4096 transitions, must not overflow"""
+    """Rollout buffer for on-policy transition storage; commonly stores ~4096 transitions, lack of overflow is enforced"""
     def __len__(self) -> int:
         return self.index
     
