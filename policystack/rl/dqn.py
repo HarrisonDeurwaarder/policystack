@@ -5,6 +5,7 @@ import copy
 
 from policystack.utils.buffers import Replay
 from policystack.config import DynamicTerm
+from policystack.training import ValueBasedTrainer
 
 from dataclasses import dataclass, field
 from typing import Callable
@@ -56,7 +57,7 @@ class DQN(nn.Module):
     
     
     
-class DQNTrainer:
+class DQNTrainer(ValueBasedTrainer):
     def _pre_training(self) -> None:
         # instantiate replay buffer
         self.replay = Replay(["next_obs", "q_values", "rewards", "dones"])
@@ -113,45 +114,6 @@ class DQNTrainer:
             # set for eval only
             self.target_policy.requires_grad(False)
             self.target_policy.eval()
-        
-        
-    def train(self) -> None:
-        env = self.config.environment
-        replay = Replay(["obs", "next_obs", "actions", "rewards", "dones"])
-        next_obs, _ = env.reset()
-        
-        # collect preliminary samples
-        # no policy refinement
-        steps = 0
-        while len(replay) < self.config.warmup:
-            steps += 1
-            epsilon = self.config.epsilon_fn(steps)
-            # sample action (in practice, this will be effectively random)
-            action = self.dqn(obs, epsilon)
-            # save "prior" obs
-            obs = next_obs
-            next_obs, reward, term, trunc, _ = env.step(action)
-            replay.add(
-                {"obs": obs, "next_obs": next_obs, "actions": action, "rewards": reward, "dones": term | trunc}
-            )
-            
-        # now, begin policy refinement
-        for iteration in range(self.config.iterations):
-            for collection_step in range(self.collection_freq):
-                # update total steps for epsilon scheduling
-                steps += 1
-                epsilon = self.config.epsilon_fn(steps)
-                
-                action = self.dqn(obs, epsilon)
-                # save "prior" obs
-                obs = next_obs
-                obs, reward, term, trunc, _ = env.step(action)
-                replay.add(
-                    {"obs": obs, "next_obs": next_obs, "actions": action, "rewards": reward, "dones": term | trunc}
-                )
-            for refinement_step in range(self.config.refinement_freq):
-                batch = replay.manual_batch(self.config.batch_size)
-                self.update()
                 
                 
                 

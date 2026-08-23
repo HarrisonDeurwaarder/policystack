@@ -5,10 +5,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from config import resolve
-
 if TYPE_CHECKING:
-    from config import DynamicTerm
+    from config import DynamicTerm, resolve
 
 
 def clipped_surrogate_objective(

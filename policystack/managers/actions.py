@@ -23,7 +23,7 @@ class ActionTerm(ABC):
         self.num_actions = num_actions
         self.effective_actions = num_actions // len(self.param_names) # exceptions in the case of categorical
         # catch impossible logit count
-        if num_actions / len(self.params) != 0:
+        if num_actions % len(self.params) != 0:
             raise ValueError(f"Expected num_actions divisible by {len(self.param_names)}, got {num_actions}")
         
         
@@ -126,7 +126,7 @@ class BernoulliAction(ActionTerm):
     }
     
     def __init__(self, num_actions: int, epsilon: float | DynamicTerm = 0.0) -> None:
-        super().__init__(self, num_actions)
+        super().__init__(num_actions)
         self.epsilon = epsilon
     
     
@@ -204,8 +204,8 @@ class CustomAction(ActionTerm):
     def __init__(self, num_actions: int, distribution: D.Distribution, params: dict[str], fn_spec: dict[str], *transforms: D.Transform) -> None:
         self.num_actions = num_actions
         self.distribution = distribution
-        self.params = params,
-        self.fn_spec = fn_spec,
+        self.params = params
+        self.fn_spec = fn_spec
         self.transforms = transforms
     
     
@@ -243,9 +243,9 @@ class ActionManager:
         actions = torch.zeros(self.batch_dims + (self.n_effective_actions,))
         i_0, i_1 = 0, 0
         for term in self.action_terms:
-            i_0, i_1 = i_1, term.effective_actions
+            i_0, i_1 = i_1, i_0 + term.effective_actions
             # insert sample into correct slice
-            actions[..., i_0:i_1] = term.deterministic_sample(n_samples) if deterministic else term.sample(n_samples)
+            actions[..., i_0:i_1] = term.deterministic_sample() if deterministic else term.sample(n_samples)
         return actions
     
     
@@ -253,9 +253,9 @@ class ActionManager:
         log_probs = torch.zeros(self.batch_dims + (self.n_effective_actions,))
         i_0, i_1 = 0, 0
         for term in self.action_terms:
-            i_0, i_1 = i_1, term.effective_actions
+            i_0, i_1 = i_1, i_0 + term.effective_actions
             # insert probs into correct slice
-            log_probs[..., i_0:i_1] = term.log_prob(actions[i_0:i_1])
+            log_probs[..., i_0:i_1] = term.log_prob(actions[..., i_0:i_1])
         return log_probs
     
     
@@ -263,6 +263,7 @@ class ActionManager:
         entropy = torch.zeros(self.batch_dims + (self.n_effective_actions,))
         i_0, i_1 = 0, 0
         for term in self.action_terms:
-            i_0, i_1 = i_1, term.effective_actions
+            i_0, i_1 = i_1, i_0 + term.effective_actions
             # insert sample into correct slice
             entropy[..., i_0:i_1] = term.entropy()
+        return entropy

@@ -12,6 +12,13 @@ from abc import ABC, abstractmethod
 from policystack.utils.buffers import Rollout, Replay
 from config import DynamicTerm
 
+"""
+Trainer templates, rather than providing substantial functionality for inheriting
+trainers, serve primarily as a template for constructing and easily reading algorithm
+trainers, also enabling simple modification of existing trainers without rewritting full
+training loops.
+"""
+
 
 
 @dataclass
@@ -189,5 +196,5 @@ class ValueBasedTrainer(ABC):
                 batch = self.replay.manual_batch(self.config.batch_size)
                 self._gradient_update(batch)
 
-            # updating frozen policy
-            self._update_frozen_policy()
+                # updating frozen policy
+                self._update_frozen_policy()

@@ -4,10 +4,8 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from config import resolve
-
 if TYPE_CHECKING:
-    from config import DynamicTerm
+    from config import DynamicTerm, resolve
 
 
 def gae(
@@ -38,7 +36,7 @@ def gae(
     
     # recursive monte carlo component (low bias)
     # computes the discounted value of a finite episode directly
-    adv_dims = rewards.shape()
+    adv_dims = list(rewards.shape)
     adv_dims[-1] += 1 # an additional dimension is added to ease code complexity
     advantages = torch.zeros(adv_dims)
     for t in range(rewards.size(-1) - 1, -1, -1): # iterate backwards from T to 0, inclusive
@@ -72,7 +70,7 @@ def td_residual(
     Returns:
         torch.Tensor: advantage estimates (B, E)
     """
-    advantages = rewards + resolve(discount_factor) * values * (1 - dones) - next_values[..., :-1]
+    advantages = rewards + resolve(discount_factor) * next_values * (1 - dones) - values
     return advantages
 
 
@@ -98,7 +96,9 @@ def monte_carlo(
     Returns:
         torch.Tensor: advantages (B, E)
     """
-    returns = torch.zeros_like(values) # (B, E)
+    dims = list(rewards.shape)
+    dims[-1] += 1 # an additional padding dimension is added
+    returns = torch.zeros(dims) # 
     # recursively compute ground-truth returns
     for t in range(rewards.size(-1) - 1, -1, -1):
         returns[..., t] = rewards[..., t] + resolve(discount_factor) * returns[..., t+1] * (1 - dones[..., t])
