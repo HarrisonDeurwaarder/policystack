@@ -1,12 +1,15 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, default_collate
 
 from abc import ABC, abstractmethod
+from typing import Callable
 
 
 class TransitionBuffer(ABC):
     """Abstract transition storage with flexible contents"""
+    
+    collate: Callable = default_collate
     
     def __init__(
         self, 
@@ -14,7 +17,7 @@ class TransitionBuffer(ABC):
         fields: dict[str, tuple[int, ...]], 
         length: int
     ) -> None:
-        # batch dims are necessary to create empty transitions of arbitrary dimensionality (e.g. B, E)
+        # batch dims are necessary to create empty transitions of arbitrary dimensionality (e.g. E)
         self.batch_dims = batch_dims
         self.field_names = fields
         self.fields = dict()
@@ -28,7 +31,7 @@ class TransitionBuffer(ABC):
     
     @abstractmethod
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        ...
+        return {field: value for field, value in self.fields.items()[idx]}
         
     
     def __getattr__(self, name: str) -> torch.Tensor:
@@ -37,8 +40,8 @@ class TransitionBuffer(ABC):
     
     def reset(self) -> None:
         """Clear the buffer and all associated attributes"""
-        for field, shape in self.fields_names.items():
-            # fields will generally be of shape (B, E, field_dims..., length)
+        for field, shape in self.field_names.items():
+            # fields will generally be of shape (E, field_dims..., length)
             self.fields[field] = torch.zeros(self.batch_dims + shape + (self.length,))
         self.index = 0
         # transition fields for one step may be staged at different points before being commited to the buffer

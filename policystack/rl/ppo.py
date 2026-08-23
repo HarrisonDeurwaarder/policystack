@@ -1,3 +1,6 @@
+from __future__ import annotations
+from typing import Tuple, Any, Callable, TYPE_CHECKING
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -5,7 +8,7 @@ from torch.distributions import Normal, Categorical
 from torch.utils.data import DataLoader
 
 from config import DynamicTerm, resolve
-from utils.buffers import Rollout
+from policystack.utils.buffers import Rollout
 from math.advantage import gae
 from math.objective import clipped_surrogate_with_entropy, critic_mse
 from training import TrainingState, OnPolicyACTrainer
@@ -13,11 +16,8 @@ from training import TrainingState, OnPolicyACTrainer
 from typing import Tuple, Any, Callable
 from dataclasses import dataclass, field, MISSING
 
-from __future__ import annotations
-from typing import Tuple, Any, Callable, TYPE_CHECKING
-
 if TYPE_CHECKING:
-    from utils.actions import ActionManager
+    from policystack.managers.actions import ActionManager
 
 
 
@@ -69,7 +69,7 @@ class PPOTrainer(OnPolicyACTrainer):
     """
     def _pre_training(self) -> None:
         # instanciate rollout
-        self.rollout = Rollout(stackable=["obs", "actions", "log_probs", "rewards", "values", "next_values", "dones", "entropy"])
+        self.rollout = Rollout(["obs", "actions", "log_probs", "rewards", "values", "next_values", "dones", "entropy"])
         
         
     def _pre_collection(self) -> None:
@@ -82,7 +82,6 @@ class PPOTrainer(OnPolicyACTrainer):
     def _collect_transition(self) -> None:
         # compute and sample action
         obs = self.rollout.from_staged("obs")
-        value = self.rollout.from_staged("obs")
         action, dist = self.ppo(obs)
         log_prob = dist.log_prob(action)
         # compute entropy for entropy term
@@ -96,7 +95,7 @@ class PPOTrainer(OnPolicyACTrainer):
         # log transition
         self.rollout.stage(fields={
             "actions": action, "log_probs": log_prob, 
-            "rewards": reward, "values": value, "next_values": next_value, 
+            "rewards": reward, "next_values": next_value, 
             "dones": done, "entropy": entropy
         })
         # obs have already been added; by staging everything else, we now have a full transition
@@ -175,7 +174,7 @@ class PPOTrainerConfig:
     # environment must follow gymnasium convention
     # step(action) -> (obs, reward, term, trunc, info)
     # reset(seed=None) -> (obs, info)
-    environment = field(default=MISSING)
+    environment: object = field(default=MISSING)
     
     # number of times transitions from each rollout are iterated over
     epochs: int | DynamicTerm = 10
@@ -193,13 +192,13 @@ class PPOTrainerConfig:
     advantage_fn: Callable = gae
     critic_loss_fn: Callable = critic_mse
     
-    policy_objective_params: dict[str, Any] = {
+    policy_objective_params: dict[str, Any] = field(default_factory={
         "clipping_param": 0.2, "entropy_coef": 0.01
-    }
-    advantage_params: dict[str, Any] = {
+    })
+    advantage_params: dict[str, Any] = field(default_factory={
         "discount_factor": 0.99, "gae_decay": 0.98
-    }
-    critic_loss_fn: dict[str, Any] = {}
+    })
+    critic_loss_params: dict[str, Any] = field(default_factory=dict())
     
     # enables the use of a single optimizer on a weighted sum of the policy and value objectives; use with a shared backbone
     # otherwise, two 

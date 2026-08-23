@@ -1,3 +1,6 @@
+from __future__ import annotations
+from typing import Any, TYPE_CHECKING, Callable
+
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
@@ -6,15 +9,9 @@ from torch.utils.data import DataLoader
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 
-from utils.buffers import Rollout, Replay
+from policystack.utils.buffers import Rollout, Replay
 from config import DynamicTerm
 
-from __future__ import annotations
-from typing import Any, TYPE_CHECKING, Callable
-
-if TYPE_CHECKING:
-    from config import Config
-    
 
 
 @dataclass
@@ -34,10 +31,17 @@ class TrainingState:
     
     iteration: int = 0
     epoch: int = 0
-    collection_step: int = 0
-    learning_step: int = 0
+    collection_steps: int = 0
+    learning_steps: int = 0
     
     extra: dict[str, Any] = field(default_factory=dict)
+    
+    
+    def __getitem__(self, key: str) -> Any:
+        # query attributes and extras
+        if key in self.extra.keys():
+            return self.extra[key]
+        return getattr(self, key)
     
     
     def make_term(self, callback: Callable) -> DynamicTerm:
@@ -52,7 +56,7 @@ class OnPolicyACTrainer(ABC):
     
     The training loop is standardized across mainstream on-policy AC algorithms, and trainers should only need to implement abstract methods
     """
-    def __init__(self, config: Config, algorithm: nn.Module, state: TrainingState) -> None:
+    def __init__(self, config, algorithm: nn.Module, state: TrainingState) -> None:
         self.config = config
         self.algorithm = algorithm
         self.state = state
@@ -107,7 +111,6 @@ class OnPolicyACTrainer(ABC):
             self._pre_collection()
             while not self.rollout.full():
                 self._collect_transition()
-                self.rollout.commit()
             
             self._pre_learning()
             # batch data
@@ -126,7 +129,7 @@ class OnPolicyACTrainer(ABC):
                     
                     
 class ValueBasedTrainer(ABC):
-    def __init__(self, config: Config, algorithm: nn.Module, state: TrainingState) -> None:
+    def __init__(self, config, algorithm: nn.Module, state: TrainingState) -> None:
         self.config = config
         self.algorithm = algorithm
         self.state = state
@@ -160,6 +163,11 @@ class ValueBasedTrainer(ABC):
         ...
         
         
+    def _update_frozen_policy(self) -> None:
+        """Conditionally update the frozen policy used to bootstrap the value objective"""
+        ...
+        
+        
     def train(self) -> None:
         # map env for easy access
         self.env = self.config.environment
@@ -172,11 +180,14 @@ class ValueBasedTrainer(ABC):
         for iteration in range(self.config.iteration):
             # collection phase
             self._pre_collection()
-            for i in range(self.config.n_collections_per_iter):
+            for step in range(self.config.n_collections_per_iter):
                 self._collect_transitions()
                 
             # learning phase
             self._pre_learning()
-            for i in range(self.n_refinements_per_iter):
+            for step in range(self.n_refinements_per_iter):
                 batch = self.replay.manual_batch(self.config.batch_size)
                 self._gradient_update(batch)
+
+            # updating frozen policy
+            self._update_frozen_policy()

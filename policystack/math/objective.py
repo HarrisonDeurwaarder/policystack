@@ -1,11 +1,11 @@
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from config import resolve
-
-from __future__ import annotations
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from config import DynamicTerm
@@ -15,7 +15,7 @@ def clipped_surrogate_objective(
     log_prob: torch.Tensor,
     old_log_prob: torch.Tensor,
     advantage: torch.Tensor,
-    clipping_param: float = 0.2 | DynamicTerm
+    clipping_param: float | DynamicTerm = 0.2
 ) -> torch.Tensor:
     """
     Computes the policy objective at a state for PPO
@@ -106,3 +106,4 @@ def msbe(
         torch.Tensor: the loss (B, E)
     """
     loss = F.mse_loss(value, reward + (1 - done) * resolve(discount_factor) * next_value)
+    return loss

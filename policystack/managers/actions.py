@@ -6,25 +6,25 @@ import torch.distributions as D
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 
-from config import Config, DynamicTerm, resolve
+from config import DynamicTerm, resolve
 
 from typing import Callable
 
 
-
 class ActionTerm(ABC):
     """Abstract term defining a distribution and a set number of action dimensions; exposes sample, log_prob, and entropy distribution properties"""
-    params: list[str] # distribution parameters as they are specified as arguments, e.g. Normal(loc, scale) => ["loc", "scale"]
+    param_names: list[str] # distribution parameters as they are specified as arguments, e.g. Normal(loc, scale) => ["loc", "scale"]
     fn_spec: dict[str, Callable | None]
     action_dist: D.Distribution
+    action_params: dict[str, torch.Tensor]
     effective_actions: int
     
     def __init__(self, num_actions: int) -> None:
         self.num_actions = num_actions
-        self.effective_actions = num_actions // len(self.params) # exceptions in the case of categorical
+        self.effective_actions = num_actions // len(self.param_names) # exceptions in the case of categorical
         # catch impossible logit count
         if num_actions / len(self.params) != 0:
-            raise ValueError(f"Expected num_actions divisible by {len(self.params)}, got {num_actions}")
+            raise ValueError(f"Expected num_actions divisible by {len(self.param_names)}, got {num_actions}")
         
         
     def _split(self, logits: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -64,35 +64,40 @@ class ActionTerm(ABC):
     def deterministic_sample(self) -> torch.Tensor:
         # method may be overriden if the deterministic sample isn't logically the mode
         return self.action_dist.mode()
+    
+    
+    def parameters(self) -> torch.Tensor:
+        """Get the distribution parameters (logits with transformations applied)"""
+        return torch.stack(self.action_params.values())
         
     
 
 class GaussianAction(ActionTerm):
     """ActionTerm sampling over a gaussian (normal) distribution; default in continuous action spaces"""
-    params = ["loc", "scale"]
+    param_names = ["loc", "scale"]
     fn_spec = {
         "scale": lambda x: x.clamp(-20, 2).exp() # outputting std in logspace is more stable
     }
     
     def make_dist(self, logits: torch.Tensor) -> None:
         # process raw logits, splitting and applying transforms
-        action_params = self._split(logits)
-        self.action_dist = D.Normal(action_params["loc"], action_params["scale"])
+        self.action_params = self._split(logits)
+        self.action_dist = D.Normal(self.action_params["loc"], self.action_params["scale"])
     
     
     
 class SquashedGaussianAction(ActionTerm):
     """ActionTerm sampling over a tanh-transformed gaussian; used in SAC"""
-    params = ["loc", "scale"]
+    param_names = ["loc", "scale"]
     fn_spec = {
         "scale": lambda x: x.clamp(-20, 2).exp() # std in logspace is more stable
     }
     
     def make_dist(self, logits: torch.Tensor) -> None:
         # process raw logits, splitting and applying transforms
-        action_params = self._split(logits)
+        self.action_params = self._split(logits)
         self.action_dist = D.TransformedDistribution(
-            D.Normal(action_params["loc"], action_params["scale"]),
+            D.Normal(self.action_params["loc"], self.action_params["scale"]),
             D.TanhTransform()
         )
         
@@ -100,7 +105,7 @@ class SquashedGaussianAction(ActionTerm):
         
 class BetaAction(ActionTerm):
     """ActionTerm sampling over a beta distribution defined by the beta function; alternative in SAC"""
-    params = ["alpha", "beta"]
+    param_names = ["alpha", "beta"]
     fn_spec = {
         "alpha": lambda x: F.softplus(x) + 1.0, # softplus enforces non-negativity; +1 translates parameters into more usable spaces
         "beta": lambda x: F.softplus(x) + 1.0
@@ -108,14 +113,14 @@ class BetaAction(ActionTerm):
     
     def make_dist(self, logits: torch.Tensor) -> None:
         # process raw logits, splitting and applying transforms
-        action_params = self._split(logits)
-        self.action_dist = D.Beta(action_params["alpha"], action_params["beta"])
+        self.action_params = self._split(logits)
+        self.action_dist = D.Beta(self.action_params["alpha"], self.action_params["beta"])
         
         
         
 class BernoulliAction(ActionTerm):
     """ActionTerm sampling over a bernoulli distribution; e.g. open/closed claw"""
-    params = ["probs"]
+    param_names = ["probs"]
     fn_spec = {
         "probs": lambda x: F.sigmoid(x)
     }
@@ -127,17 +132,17 @@ class BernoulliAction(ActionTerm):
     
     def make_dist(self, logits: torch.Tensor) -> None:
         # process raw logits, splitting and applying transforms
-        action_params = self._split(logits)
+        self.action_params = self._split(logits)
         # apply epsilon-greedy probability
         epsilon = resolve(self.epsilon)
-        probs = (1.0 - epsilon) * action_params + epsilon / 2.0 # by the law of total probability
+        probs = (1.0 - epsilon) * self.action_params + epsilon / 2.0 # by the law of total probability
         self.action_dist = D.Bernoulli(probs)
         
         
         
 class CategoricalAction(ActionTerm):
     """ActionTerm sampling over a categorical distribution (outputs only one action per term, unlike other ActionTerms); e.g. WASD"""
-    params = ["probs"]
+    param_names = ["probs"]
     fn_spec = {
         "probs": lambda x: F.softmax(x, dim=-1)
     }
@@ -150,10 +155,10 @@ class CategoricalAction(ActionTerm):
     
     def make_dist(self, logits: torch.Tensor) -> None:
         # process raw logits, splitting and applying transforms
-        action_params = self._split(logits)
+        self.action_params = self._split(logits)
         # apply epsilon-greedy probability
         epsilon = resolve(self.epsilon)
-        probs = (1.0 - epsilon) * action_params + epsilon / self.num_actions
+        probs = (1.0 - epsilon) * self.action_params + epsilon / self.num_actions
         self.action_dist = D.Independent(
             D.Categorical(probs), 1
         )
@@ -173,7 +178,7 @@ class CategoricalDeltaAction(CategoricalAction):
 
 class GlobalStdGaussianAction(nn.Module, ActionTerm):
     """ActionTerm sampling over a gaussian distribution with a universal, learned std"""
-    params = ["loc"]
+    param_names = ["loc"]
     fn_spec = {}
     
     def __init__(self, num_actions: int) -> None:
@@ -186,11 +191,11 @@ class GlobalStdGaussianAction(nn.Module, ActionTerm):
     
     def make_dist(self, logits: torch.Tensor) -> None:
         # process raw logits, splitting and applying transforms
-        action_params = self._split(logits)
+        self.action_params = self._split(logits)
         # expand std across batches and envs
         # also enable logspace learning
         effective_std = self.log_std.exp() # (A,)
-        self.action_dist = D.Normal(action_params["loc"], effective_std) # (B, E, A)
+        self.action_dist = D.Normal(self.action_params["loc"], effective_std) # (B, E, A)
         
         
         
@@ -206,9 +211,9 @@ class CustomAction(ActionTerm):
     
     def make_dist(self, logits: torch.Tensor) -> None:
         # process raw logits, splitting and applying transforms
-        action_params = self._split(logits)
+        self.action_params = self._split(logits)
         # enforce arg-name aligned parameters
-        try: dist = self.distribution(**action_params)
+        try: dist = self.distribution(**self.action_params)
         except TypeError: raise TypeError(f"Passed distribution ({self.distribution.__class__}) encountered an unexpected distribution parameter. Please ensure all parameters match arguments in the distribution.")
         
         self.action_dist = D.TransformedDistribution(
@@ -221,7 +226,7 @@ class ActionManager:
     """Intercepts raw logits and supplies interpretable actions to the environment"""
     batch_dims: tuple[int]
     
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: ActionConfig) -> None:
         self.cfg = cfg
         self.action_terms = cfg.action_terms
         # some terms morph logit dimensions
