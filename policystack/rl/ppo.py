@@ -82,10 +82,10 @@ class PPOTrainer(OnPolicyACTrainer):
     def _collect_transition(self) -> None:
         # compute and sample action
         obs = self.rollout.from_staged("obs")
-        action, dist = self.ppo(obs)
-        log_prob = dist.log_prob(action)
+        action = self.ppo(obs) # register logits
+        log_prob = self.ppo.config.action_manager.log_prob(action)
         # compute entropy for entropy term
-        entropy = dist.entropy()
+        entropy = self.ppo.config.action_manager.entropy(action)
         
         next_obs, reward, term, trunc, _ = self.env.step(action)
         # compute critic value for next state
