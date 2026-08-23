@@ -13,37 +13,53 @@ from training import TrainingState, OnPolicyACTrainer
 from typing import Tuple, Any, Callable
 from dataclasses import dataclass, field, MISSING
 
+from __future__ import annotations
+from typing import Tuple, Any, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from utils.actions import ActionManager
+
 
 
 class PPO(nn.Module):
     """
     Proximal policy optimization algorithm
     """
-    def __init__(self, actor: nn.Module, critic: nn.Module) -> None:
+    def __init__(self, config: PPOConfig) -> None:
         super().__init__()
-        self.policy = actor
-        self.value = critic
+        self.config = config
+        self.policy = config.actor
+        self.value = config.critic
         
     
     def __call__(self, obs: torch.Tensor) -> tuple[torch.Tensor, Normal]:
-        # __call__ provides both the given distribution and a sampled action
-        dist = super().__call__()
-        action = dist.sample()
-        return action, dist
+        return super().__call__(obs)
     
     
-    def forward(self, obs: torch.Tensor) -> Normal:
-        out = self.actor(obs) # (..B, N*2)
-        # extract gaussian parameters
-        mean, logvar = torch.chunk(out, chunks=2, dim=-1) # (..B, N, 2)
-        # assume network to output variance in logspace
-        dist = Normal(mean, torch.exp(logvar))
-        return dist
+    def forward(self, obs: torch.Tensor, deterministic: bool = False) -> Normal:
+        out = self.policy(obs) # (B, E, logits)
+        # make the action distributions
+        self.config.action_manager.make_dists(out)
+        # return a sampled action
+        return self.sample_action(deterministic)
+        
+        
+    def sample_action(self, deterministic: bool = False) -> torch.Tensor:
+        # sample using the current distribution
+        return self.config.action_manager.sample(deterministic)
+    
+    
+    def entropy(self) -> torch.Tensor:
+        return self.config.action_manager.entropy()
+    
+    
+    def log_prob(self, action: torch.Tensor) -> torch.Tensor:
+        return self.config.action_manager.log_prob(action)
     
     
     def get_value(self, obs: torch.Tensor) -> torch.Tensor:
         value = self.value(obs)
-        return value # (..B, 1)
+        return value # (B, E)
 
 
 
@@ -132,24 +148,31 @@ class PPOTrainer(OnPolicyACTrainer):
         self.config.critic_op.step()
 
 
+@dataclass
+class PPOConfig:
+    # network architecture parameters
+    # for the state-action function, the return value of forward() should be
+    # keyed using the aliases defined in your ActionManager object
+    # else, all actions will be assumed to be continuous and may impose downstream errors
+    actor: nn.Module
+    critic: nn.Module
+    # all raw logits pass through the action manager, then are divided into distributions specified by ActionTerms
+    # and are recombined into action values, entropy, or lob probs
+    action_manager: ActionManager
+
+
 
 @dataclass
-class PPOConfig(Config):
+class PPOTrainerConfig:
     """
     Config template for PPO
     """
-    # network architecture parameters
-    # for the state-action function, the return value of forward() must
-    # be keyed {"continuous": ..., "discrete": ...}
-    # else, all actions will be assumed to be continous and may impose downstream errors
-    actor: nn.Module
-    critic: nn.Module
-    # assumes that actor/critic are trained seperately
+    # assumes that actor/critic are trained separately
     # i.e. no shared backbone
     actor_op: optim.Optimizer # note that learning rate scheduling is done within the optimizers; other curriculum
     critic_op: optim.Optimizer
     
-    # enviornment must follow gymnassium convention
+    # environment must follow gymnasium convention
     # step(action) -> (obs, reward, term, trunc, info)
     # reset(seed=None) -> (obs, info)
     environment = field(default=MISSING)
@@ -163,7 +186,7 @@ class PPOConfig(Config):
     rollout_length: int | DynamicTerm = 1024
     
     # alloted ratio-difference between the target policy and trained policy
-    # prevents caatstrophic poicy collapse by limited the amount the policy can learn in on cycle
+    # prevents catastrophic policy collapse by limited the amount the policy can learn in on cycle
     #clipping_param: float = 0.2
     
     policy_objective_fn: Callable = clipped_surrogate_with_entropy
