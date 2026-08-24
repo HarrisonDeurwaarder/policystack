@@ -3,14 +3,13 @@ from typing import Any, TYPE_CHECKING, Callable
 
 import torch
 import torch.nn as nn
-from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 
 from policystack.utils.buffers import Rollout, Replay
-from config import DynamicTerm
+from policystack.utils.config import DynamicTerm
 
 """
 Trainer templates, rather than providing substantial functionality for inheriting

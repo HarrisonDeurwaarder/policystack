@@ -4,8 +4,10 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from policystack.utils.config import resolve
+
 if TYPE_CHECKING:
-    from config import DynamicTerm, resolve
+    from policystack.utils.config import DynamicTerm
 
 
 def gae(
@@ -104,4 +106,4 @@ def monte_carlo(
         returns[..., t] = rewards[..., t] + resolve(discount_factor) * returns[..., t+1] * (1 - dones[..., t])
     # then compute the difference
     advantages = returns - values
-    return advantages
+    return advantages[..., :-1]

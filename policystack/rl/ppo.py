@@ -7,11 +7,11 @@ import torch.optim as optim
 from torch.distributions import Normal, Categorical
 from torch.utils.data import DataLoader
 
-from config import DynamicTerm, resolve
+from policystack.utils.config import DynamicTerm, resolve
 from policystack.utils.buffers import Rollout
-from math.advantage import gae
-from math.objective import clipped_surrogate_with_entropy, critic_mse
-from training import TrainingState, OnPolicyACTrainer
+from policystack.math.advantage import gae
+from policystack.math.objective import clipped_surrogate_with_entropy, critic_mse
+from policystack.training import TrainingState, OnPolicyACTrainer
 
 from typing import Tuple, Any, Callable
 from dataclasses import dataclass, field, MISSING
@@ -83,9 +83,9 @@ class PPOTrainer(OnPolicyACTrainer):
         # compute and sample action
         obs = self.rollout.from_staged("obs")
         action = self.ppo(obs) # register logits
-        log_prob = self.ppo.config.action_manager.log_prob(action)
+        log_prob = self.ppo.log_prob(action)
         # compute entropy for entropy term
-        entropy = self.ppo.config.action_manager.entropy(action)
+        entropy = self.ppo.entropy()
         
         next_obs, reward, term, trunc, _ = self.env.step(action)
         # compute critic value for next state
@@ -110,7 +110,8 @@ class PPOTrainer(OnPolicyACTrainer):
          # compute advantages across rollout
         advantages = self.config.advantage_fn(
             rewards=self.rollout.rewards, 
-            expected_values=self.rollout.values, 
+            values=self.rollout.values,
+            next_values=self.rollout.next_values,
             dones=self.rollout.dones, 
             **self.config.advantage_params,
         )
@@ -121,8 +122,8 @@ class PPOTrainer(OnPolicyACTrainer):
         # update policy
         self.config.actor_op.zero_grad()
         # compute current distributions
-        _, dist = self.ppo(batch["obs"])
-        log_probs = dist.log_prob(batch["actions"])
+        _ = self.ppo(batch["obs"])
+        log_probs = self.ppo.log_prob(batch["actions"])
         act_loss = self.config.policy_objective_fn(
             log_prob=log_probs,
             old_log_prob=batch["log_probs"],
@@ -192,13 +193,13 @@ class PPOTrainerConfig:
     advantage_fn: Callable = gae
     critic_loss_fn: Callable = critic_mse
     
-    policy_objective_params: dict[str, Any] = field(default_factory={
+    policy_objective_params: dict[str, Any] = field(default_factory=lambda: {
         "clipping_param": 0.2, "entropy_coef": 0.01
     })
-    advantage_params: dict[str, Any] = field(default_factory={
+    advantage_params: dict[str, Any] = field(default_factory=lambda: {
         "discount_factor": 0.99, "gae_decay": 0.98
     })
-    critic_loss_params: dict[str, Any] = field(default_factory=dict())
+    critic_loss_params: dict[str, Any] = field(default_factory=dict)
     
     # enables the use of a single optimizer on a weighted sum of the policy and value objectives; use with a shared backbone
     # otherwise, two 

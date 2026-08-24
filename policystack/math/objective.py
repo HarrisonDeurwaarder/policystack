@@ -5,8 +5,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from policystack.utils.config import resolve
+
 if TYPE_CHECKING:
-    from config import DynamicTerm, resolve
+    from policystack.utils.config import DynamicTerm
 
 
 def clipped_surrogate_objective(

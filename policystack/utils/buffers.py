@@ -13,15 +13,15 @@ class TransitionBuffer(ABC):
     
     def __init__(
         self, 
-        batch_dims: tuple[int, ...], 
-        fields: dict[str, tuple[int, ...]], 
+        fields: list[str], 
         length: int
     ) -> None:
-        # batch dims are necessary to create empty transitions of arbitrary dimensionality (e.g. E)
-        self.batch_dims = batch_dims
+        # enforce persistent field names across resets
+        # dims are inferred upon the first call of add()
         self.field_names = fields
         self.fields = dict()
         self.length = length
+        self.populated = False
         
         
     @abstractmethod
@@ -29,9 +29,8 @@ class TransitionBuffer(ABC):
         ...
         
     
-    @abstractmethod
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        return {field: value for field, value in self.fields.items()[idx]}
+        return {field: self.fields[field][idx] for field in self.field_names}
         
     
     def __getattr__(self, name: str) -> torch.Tensor:
@@ -39,13 +38,17 @@ class TransitionBuffer(ABC):
         
     
     def reset(self) -> None:
-        """Clear the buffer and all associated attributes"""
-        for field, shape in self.field_names.items():
-            # fields will generally be of shape (E, field_dims..., length)
-            self.fields[field] = torch.zeros(self.batch_dims + shape + (self.length,))
         self.index = 0
         # transition fields for one step may be staged at different points before being commited to the buffer
         self.staged = dict()
+        self.populated = False
+        
+        
+        
+    def populate(self, field_dims: dict[str, torch.Size]) -> None:
+        for field, size in field_dims.items():
+            # fields will generally be of shape (E, field_dims..., length)
+            self.fields[field] = torch.zeros(size + torch.Size((self.length,)))
         
         
     def stage(self, fields: dict[int, torch.Tensor]) -> None:
@@ -67,6 +70,10 @@ class TransitionBuffer(ABC):
     
     def add(self, fields: dict[str, torch.Tensor]) -> None:
         """Adds a new transition to the buffer"""
+        # resolve field shapes if unpopulated
+        if not self.populated:
+            self.populate({field: fields[field].shape for field in fields})
+            
         for field_name in self.field_names.keys():
             self.fields[field_name][..., self.index] = fields[field_name] # copy the reference from the passed transition
         # the next available index should be used
@@ -77,8 +84,8 @@ class TransitionBuffer(ABC):
         """Annotate a new column to the buffer"""
         # verify that the correct batch dimensions and length exist
         shape = field.shape()
-        if shape[:len(self.batch_dims)] != self.batch_dims or shape[-1] != self.__len__():
-            raise ValueError(f"Expected field of leading shape {self.batch_dims} and trailing dimension {self.__len__()}, got {shape}")
+        if shape[-1] != self.__len__():
+            raise ValueError(f"Expected field of trailing dimension {self.__len__()}, got {shape}")
         # verify that field does not already exist
         if field_name in self.fields.keys():
             raise ValueError(f"Field {field_name} is already in buffer ({list(self.fields.keys())})")

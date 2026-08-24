@@ -6,7 +6,7 @@ import torch.distributions as D
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 
-from config import DynamicTerm, resolve
+from policystack.utils.config import DynamicTerm, resolve
 
 from typing import Callable
 
@@ -23,14 +23,14 @@ class ActionTerm(ABC):
         self.num_actions = num_actions
         self.effective_actions = num_actions // len(self.param_names) # exceptions in the case of categorical
         # catch impossible logit count
-        if num_actions % len(self.params) != 0:
+        if num_actions % len(self.param_names) != 0:
             raise ValueError(f"Expected num_actions divisible by {len(self.param_names)}, got {num_actions}")
         
         
     def _split(self, logits: torch.Tensor) -> dict[str, torch.Tensor]:
         action_params = dict()
         # tie a deterministic slice of the output to a certain parameter
-        for param, logit in zip(self.params, torch.chunk(logits, chunks=len(self.params), dim=-1)):
+        for param, logit in zip(self.param_names, torch.chunk(logits, chunks=len(self.params), dim=-1)):
             fn = self.fn_spec.get(param, None)
             # if fn is specified for the parameter, apply, othwerwise bundle as-is
             if fn is None: action_params[param] = logit
@@ -135,7 +135,7 @@ class BernoulliAction(ActionTerm):
         self.action_params = self._split(logits)
         # apply epsilon-greedy probability
         epsilon = resolve(self.epsilon)
-        probs = (1.0 - epsilon) * self.action_params + epsilon / 2.0 # by the law of total probability
+        probs = (1.0 - epsilon) * self.action_params["probs"] + epsilon / 2.0 # by the law of total probability
         self.action_dist = D.Bernoulli(probs)
         
         
@@ -158,7 +158,7 @@ class CategoricalAction(ActionTerm):
         self.action_params = self._split(logits)
         # apply epsilon-greedy probability
         epsilon = resolve(self.epsilon)
-        probs = (1.0 - epsilon) * self.action_params + epsilon / self.num_actions
+        probs = (1.0 - epsilon) * self.action_params["probs"] + epsilon / self.num_actions
         self.action_dist = D.Independent(
             D.Categorical(probs), 1
         )
@@ -182,7 +182,9 @@ class GlobalStdGaussianAction(nn.Module, ActionTerm):
     fn_spec = {}
     
     def __init__(self, num_actions: int) -> None:
-        super().__init__()
+        nn.Module.__init__(self)
+        ActionTerm.__init__(self, num_actions)
+        
         self.num_actions = num_actions
         self.log_std = nn.Parameter(
             torch.zeros((num_actions,))
