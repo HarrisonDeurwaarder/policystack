@@ -35,17 +35,15 @@ class DQN(nn.Module):
         return self.sample_action(deterministic)
     
     
-    def q_values(self, deterministic: bool = False) -> torch.Tensor:
-        """Assumes the correct distribution to be assembled; returns q-values"""
+    def q_values(self) -> torch.Tensor:
+        """Assumes the correct distribution to be assembled; returns q-values as given by the network"""
         # sample using the current distribution
-        return self.config.action_manager.sample(deterministic) # (B, E, A)
+        return self.config.action_manager.logits() # (B, E, L)
         
         
     def sample_action(self, deterministic: bool = False) -> torch.Tensor:
-        """Assumes the distribution to be assembled; returns the action index"""
-        q_vals = self.q_values(deterministic)
-        # recompute q-values without exploration
-        return torch.argmax(q_vals, dim=-1) # (B, E)
+        """Assumes the distribution to be assembled; returns the action onehot"""
+        return self.config.action_manager.sample_action(deterministic) # (B, E, A)
     
     
     def entropy(self) -> torch.Tensor:
@@ -79,7 +77,6 @@ class DQNTrainer(ValueBasedTrainer):
         action_qval = self.algorithm.q_values(deterministic=True)[..., idx]
         next_obs, reward, term, trunc, _ = self.env.step(idx)
         # save "prior" obs
-        next_obs, reward, term, trunc, _ = self.env.step(idx)
         self.replay.stage(
             {"next_obs": next_obs, "q_values": action_qval, "rewards": reward, "dones": term | trunc}
         )
@@ -96,7 +93,7 @@ class DQNTrainer(ValueBasedTrainer):
         loss = self.config.loss_fn(
             reward=batch["rewards"],
             value=batch["q_values"],
-            next_value=self.target_policy.q_value(),
+            next_value=self.target_policy.q_values(deterministic),
             done=batch["dones"],
             **self.config.loss_params,
         )
@@ -120,13 +117,13 @@ class DQNConfig:
     # and are recombined into action values, entropy, or lob probs
     action_manager: ActionManager
     
-    # enables exploration in the dqn; policy with a probability of epsilon selects a random action
-    epsilon_fn: DynamicTerm | float = 0.05
-    
     # gradient update fields
     op: optim.Optimizer
     loss_fn: Callable = msbe
     loss_params: dict[str, Any] = field(default_factory=dict)
+    
+    # enables exploration in the dqn; policy with a probability of epsilon selects a random action
+    epsilon_fn: DynamicTerm | float = 0.05
     
     # number of warmup steps
     warmup: int = 8_000

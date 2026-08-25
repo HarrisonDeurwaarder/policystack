@@ -14,10 +14,11 @@ from typing import Callable
 class ActionTerm(ABC):
     """Abstract term defining a distribution and a set number of action dimensions; exposes sample, log_prob, and entropy distribution properties"""
     param_names: list[str] # distribution parameters as they are specified as arguments, e.g. Normal(loc, scale) => ["loc", "scale"]
-    fn_spec: dict[str, Callable | None]
-    action_dist: D.Distribution
-    action_params: dict[str, torch.Tensor]
-    effective_actions: int
+    fn_spec: dict[str, Callable | None] # transformation applied to logits, by classifier
+    action_dist: D.Distribution # root distribution object, independent of any pre or post transforms
+    action_params: dict[str, torch.Tensor] # distribution parameters; post transformation and split
+    effective_actions: int # number of logit spaces per output action
+    raw_logits: torch.Tensor # pre-transform logits for book-keeping
     
     def __init__(self, num_actions: int) -> None:
         self.num_actions = num_actions
@@ -28,6 +29,7 @@ class ActionTerm(ABC):
         
         
     def _split(self, logits: torch.Tensor) -> dict[str, torch.Tensor]:
+        self.raw_logits = logits
         action_params = dict()
         # tie a deterministic slice of the output to a certain parameter
         for param, logit in zip(self.param_names, torch.chunk(logits, chunks=len(self.param_names), dim=-1)):
@@ -69,6 +71,10 @@ class ActionTerm(ABC):
     def parameters(self) -> torch.Tensor:
         """Get the distribution parameters (logits with transformations applied)"""
         return torch.stack(self.action_params.values())
+        
+        
+    def logits(self) -> torch.Tensor:
+        return self.raw_logits # (B, E, L)
         
     
 
