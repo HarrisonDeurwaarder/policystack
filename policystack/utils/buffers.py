@@ -30,7 +30,7 @@ class TransitionBuffer(ABC):
         
     
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        return {field: self.fields[field][idx] for field in self.field_names}
+        return {field: self.fields[field][..., idx] for field in self.field_names}
         
     
     def __getattr__(self, name: str) -> torch.Tensor:
@@ -74,8 +74,8 @@ class TransitionBuffer(ABC):
         if not self.populated:
             self.populate({field: fields[field].shape for field in fields})
             
-        for field_name in self.field_names.keys():
-            self.fields[field_name][..., self.index] = fields[field_name] # copy the reference from the passed transition
+        for field in self.field_names:
+            self.fields[field][..., self.index] = fields[field] # copy the reference from the passed transition
         # the next available index should be used
         self.index += 1
             
@@ -83,9 +83,8 @@ class TransitionBuffer(ABC):
     def annotate(self, field_name: str, field: torch.Tensor) -> None:
         """Annotate a new column to the buffer"""
         # verify that the correct batch dimensions and length exist
-        shape = field.shape()
-        if shape[-1] != self.__len__():
-            raise ValueError(f"Expected field of trailing dimension {self.__len__()}, got {shape}")
+        if field.shape[-1] != self.__len__():
+            raise ValueError(f"Expected field of trailing dimension {self.__len__()}, got {field.shape}")
         # verify that field does not already exist
         if field_name in self.fields.keys():
             raise ValueError(f"Field {field_name} is already in buffer ({list(self.fields.keys())})")

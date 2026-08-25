@@ -22,11 +22,12 @@ class DQN(nn.Module):
         self.net = config.net
         
     
-    def __call__(self, obs: torch.Tensor) -> torch.Tensor:
-        return super().__call__(obs)
+    def __call__(self, obs: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
+        return super().__call__(obs, deterministic)
         
         
     def forward(self, obs: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
+        """Assembles and returns an action index"""
         out = self.net(obs) # (B, E, A)
         # make the action distributions
         self.config.action_manager.make_dists(out)
@@ -34,15 +35,17 @@ class DQN(nn.Module):
         return self.sample_action(deterministic)
     
     
-    def q_value(self, obs: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
-        idx = self.forward(obs, deterministic)
-        # attain q-value by indexing dist parameters
-        return self.sample_action(deterministic=True)[..., idx]
+    def q_values(self, deterministic: bool = False) -> torch.Tensor:
+        """Assumes the correct distribution to be assembled; returns q-values"""
+        # sample using the current distribution
+        return self.config.action_manager.sample(deterministic) # (B, E, A)
         
         
     def sample_action(self, deterministic: bool = False) -> torch.Tensor:
-        # sample using the current distribution
-        return self.config.action_manager.sample(deterministic) # (B, E)
+        """Assumes the distribution to be assembled; returns the action index"""
+        q_vals = self.q_values(deterministic)
+        # recompute q-values without exploration
+        return torch.argmax(q_vals, dim=-1) # (B, E)
     
     
     def entropy(self) -> torch.Tensor:
@@ -57,33 +60,28 @@ class DQN(nn.Module):
 class DQNTrainer(ValueBasedTrainer):
     def _pre_training(self) -> None:
         # instantiate replay buffer
-        self.replay = Replay(["obs", "next_obs", "q_values", "rewards", "dones"])
+        self.replay = Replay(["obs", "next_obs", "q_values", "rewards", "dones"], length=self.config.buffer_size)
         obs, _ = self.env.reset()
+        self.replay.stage({"obs": obs})
         
         # collect preliminary samples
         # no policy refinement
         while len(self.replay) < self.config.warmup:
-            # register a distribution + sample from that distribution
-            action = self.algorithm(obs)
-            # index q value
-            q_val = self.algorithm.action_manager.action_params[..., action]
-            next_obs, reward, term, trunc, _ = self.env.step(action)
-            self.replay.stage(
-                {"next_obs": next_obs, "q_values": q_val, "rewards": reward, "dones": term | trunc}
-            )
-            self.replay.commit()
-            # next_obs => obs for next step
-            obs = next_obs
+            self._collect_transitions()
         # establish target policy
         self._update_frozen_policy()
         
         
     def _collect_transitions(self) -> None:
-        action = self.algorithm(self.replay.staged["obs"])
+        idx = self.algorithm(self.replay.staged["obs"])
+        # index q-value
+        # usable q-values must not have exploration applied
+        action_qval = self.algorithm.q_values(deterministic=True)[..., idx]
+        next_obs, reward, term, trunc, _ = self.env.step(idx)
         # save "prior" obs
-        next_obs, reward, term, trunc, _ = self.env.step(action)
+        next_obs, reward, term, trunc, _ = self.env.step(idx)
         self.replay.stage(
-            {"next_obs": next_obs, "actions": action, "rewards": reward, "dones": term | trunc}
+            {"next_obs": next_obs, "q_values": action_qval, "rewards": reward, "dones": term | trunc}
         )
         self.replay.commit()
         # restage next obs for subsequent step
@@ -118,11 +116,12 @@ class DQNTrainer(ValueBasedTrainer):
 @dataclass
 class DQNConfig:
     net: nn.Module
-    # enables exploration in the dqn; policy with a probability of epsilon selects a random action
-    epsilon_fn: DynamicTerm | float = 0.05
     # all raw logits pass through the action manager, then are divided into distributions specified by ActionTerms
     # and are recombined into action values, entropy, or lob probs
     action_manager: ActionManager
+    
+    # enables exploration in the dqn; policy with a probability of epsilon selects a random action
+    epsilon_fn: DynamicTerm | float = 0.05
     
     # gradient update fields
     op: optim.Optimizer
@@ -137,6 +136,7 @@ class DQNConfig:
     collection_freq: DynamicTerm | int = 1
     refinement_freq: DynamicTerm | int = 1
     
+    buffer_size: DynamicTerm | int = 1_000_000
     batch_size: DynamicTerm | int = 64
     
     target_update_interval: DynamicTerm | int = 8_000 # gradient updates

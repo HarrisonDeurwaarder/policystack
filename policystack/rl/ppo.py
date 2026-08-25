@@ -32,8 +32,8 @@ class PPO(nn.Module):
         self.value = config.critic
         
     
-    def __call__(self, obs: torch.Tensor) -> tuple[torch.Tensor, Normal]:
-        return super().__call__(obs)
+    def __call__(self, obs: torch.Tensor, deterministic: bool = False) -> tuple[torch.Tensor, Normal]:
+        return super().__call__(obs, deterministic)
     
     
     def forward(self, obs: torch.Tensor, deterministic: bool = False) -> Normal:
@@ -69,7 +69,7 @@ class PPOTrainer(OnPolicyACTrainer):
     """
     def _pre_training(self) -> None:
         # instanciate rollout
-        self.rollout = Rollout(["obs", "actions", "log_probs", "rewards", "values", "next_values", "dones", "entropy"])
+        self.rollout = Rollout(["obs", "actions", "log_probs", "rewards", "values", "next_values", "dones", "entropy"], length=self.config.rollout_length)
         
         
     def _pre_collection(self) -> None:

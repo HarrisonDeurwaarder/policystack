@@ -30,7 +30,7 @@ class ActionTerm(ABC):
     def _split(self, logits: torch.Tensor) -> dict[str, torch.Tensor]:
         action_params = dict()
         # tie a deterministic slice of the output to a certain parameter
-        for param, logit in zip(self.param_names, torch.chunk(logits, chunks=len(self.params), dim=-1)):
+        for param, logit in zip(self.param_names, torch.chunk(logits, chunks=len(self.param_names), dim=-1)):
             fn = self.fn_spec.get(param, None)
             # if fn is specified for the parameter, apply, othwerwise bundle as-is
             if fn is None: action_params[param] = logit
