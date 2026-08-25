@@ -42,7 +42,7 @@ class DQN(nn.Module):
         
         
     def sample_action(self, deterministic: bool = False) -> torch.Tensor:
-        """Assumes the distribution to be assembled; returns the action onehot"""
+        """Assumes the distribution to be assembled; returns the action index"""
         return self.config.action_manager.sample_action(deterministic) # (B, E, A)
     
     
@@ -74,7 +74,7 @@ class DQNTrainer(ValueBasedTrainer):
         idx = self.algorithm(self.replay.staged["obs"])
         # index q-value
         # usable q-values must not have exploration applied
-        action_qval = self.algorithm.q_values(deterministic=True)[..., idx]
+        action_qval = self.algorithm.q_values()[..., idx]
         next_obs, reward, term, trunc, _ = self.env.step(idx)
         # save "prior" obs
         self.replay.stage(
@@ -88,12 +88,15 @@ class DQNTrainer(ValueBasedTrainer):
     def _gradient_update(self, batch: dict[str, torch.Tensor]) -> None:
         # update policy
         self.config.op.zero_grad()
+        # next q-value must be computed using the target
+        idx = self.target_policy(batch["next_obs"])
+        next_qval = self.target_policy.q_values()[..., idx]
         # compute current distributions
         self.target_policy(batch["next_obs"])
         loss = self.config.loss_fn(
             reward=batch["rewards"],
             value=batch["q_values"],
-            next_value=self.target_policy.q_values(deterministic),
+            next_value=next_qval,
             done=batch["dones"],
             **self.config.loss_params,
         )

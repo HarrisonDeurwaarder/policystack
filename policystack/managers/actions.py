@@ -17,7 +17,7 @@ class ActionTerm(ABC):
     fn_spec: dict[str, Callable | None] # transformation applied to logits, by classifier
     action_dist: D.Distribution # root distribution object, independent of any pre or post transforms
     action_params: dict[str, torch.Tensor] # distribution parameters; post transformation and split
-    effective_actions: int # number of logit spaces per output action
+    effective_actions: int # number of actions output given the logit spaces passed
     raw_logits: torch.Tensor # pre-transform logits for book-keeping
     
     def __init__(self, num_actions: int) -> None:
@@ -25,7 +25,7 @@ class ActionTerm(ABC):
         self.effective_actions = num_actions // len(self.param_names) # exceptions in the case of categorical
         # catch impossible logit count
         if num_actions % len(self.param_names) != 0:
-            raise ValueError(f"Expected num_actions divisible by {len(self.param_names)}, got {num_actions}")
+            raise ValueError(f"Expected num_actions divisible by {len(self.param_names)} for proper logit partitioning, got {num_actions}")
         
         
     def _split(self, logits: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -64,7 +64,7 @@ class ActionTerm(ABC):
     
     
     def deterministic_sample(self) -> torch.Tensor:
-        # method may be overriden if the deterministic sample isn't logically the mode
+        # method must be overriden if the deterministic sample isn't logically the mode
         return self.action_dist.mode()
     
     
@@ -165,9 +165,7 @@ class CategoricalAction(ActionTerm):
         # apply epsilon-greedy probability
         epsilon = resolve(self.epsilon)
         probs = (1.0 - epsilon) * self.action_params["probs"] + epsilon / self.num_actions
-        self.action_dist = D.Independent(
-            D.Categorical(probs), 1
-        )
+        self.action_dist = D.Categorical(probs)
         
         
         
@@ -238,6 +236,7 @@ class ActionManager:
         self.cfg = cfg
         self.action_terms = cfg.action_terms
         # some terms morph logit dimensions
+        self.n_logits = sum([term.num_actions for term in self.action_terms])
         self.n_effective_actions = sum([term.effective_actions for term in self.action_terms])
         
         
@@ -275,3 +274,13 @@ class ActionManager:
             # insert sample into correct slice
             entropy[..., i_0:i_1] = term.entropy()
         return entropy
+    
+    
+    def logits(self) -> torch.Tensor:
+        logits = torch.zeros(self.batch_dims + (self.n_logits,))
+        i_0, i_1 = 0, 0
+        for term in self.action_terms:
+            i_0, i_1 = i_1, i_0 + term.effective_actions
+            # insert sample into correct slice
+            logits[..., i_0:i_1] = term.logits()
+        return logits
