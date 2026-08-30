@@ -29,16 +29,24 @@ class TransitionBuffer(ABC):
         ...
         
     
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        # enforce integer keys
-        if not isinstance(idx, int):
-            raise ValueError(f"Expected idx to be of datatype 'str', got '{type(idx)}'")
-        return {field: self.fields[field][..., idx] for field in self.field_names}
+    def __getitem__(self, idx: int | str) -> dict[str, torch.Tensor]:
+        # enforce integer or string keys
+        if isinstance(idx, int):
+            return {field: self.fields[field][..., idx] for field in self.field_names}
+        elif isinstance(idx, str):
+            # enforce key existence
+            if not idx in self.fields.keys():
+                raise KeyError(f"'{idx}'")
+            return self.fields[idx]
+        elif isinstance(idx, slice):
+            raise NotImplementedError()
+        else:
+            raise ValueError(f"Expected idx to be of datatype 'int' or 'str, got '{type(idx)}'")
         
     
     def __getattr__(self, name: str) -> torch.Tensor:
         if name in self.fields.keys():
-            return self.fields[name]
+            return self.__getitem__(idx=name)
         else:
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
         
@@ -48,7 +56,6 @@ class TransitionBuffer(ABC):
         # transition fields for one step may be staged at different points before being commited to the buffer
         self.staged = dict()
         self.populated = False
-        
         
         
     def populate(self, field_dims: dict[str, torch.Size]) -> None:
@@ -109,8 +116,8 @@ class Replay(TransitionBuffer):
     def __getitem__(self, idx):
         # DataLoader only batches using positive indices
         # negative indicies should be more precise
-        if idx < 0:
-            idx = (idx + 1) % self.length
+        if isinstance(idx, int) and idx < 0:
+            idx = (self.index + idx + self.length) % self.length
         return super().__getitem__(idx)
     
     
@@ -135,7 +142,7 @@ class Rollout(TransitionBuffer):
     
     
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        if idx < 0:
+        if isinstance(idx, int) and idx < 0:
             idx = self.index + (idx + 1) # intuitively handle negative indices
         return super().__getitem__(idx)
     
