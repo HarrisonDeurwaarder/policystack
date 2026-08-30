@@ -1,3 +1,6 @@
+from __future__ import annotations
+from typing import Tuple, Any, Callable, TYPE_CHECKING
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -13,6 +16,9 @@ from policystack.math.objective import msbe
 from dataclasses import dataclass, field
 from typing import Callable, Any
 
+if TYPE_CHECKING:
+    from managers.actions import ActionConfig
+
 
 class DQN(nn.Module):
     
@@ -20,6 +26,7 @@ class DQN(nn.Module):
         super().__init__()
         self.config = config
         self.net = config.net
+        self.action_manager = ActionManager(config.action_config)
         
     
     def __call__(self, obs: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
@@ -30,28 +37,28 @@ class DQN(nn.Module):
         """Assembles and returns an action index"""
         out = self.net(obs) # (B, E, A)
         # make the action distributions
-        self.config.action_manager.make_dists(out)
+        self.action_manager.make_dists(out)
         # return a sampled action
-        return self.sample_action(deterministic)
+        return self.sample_action(deterministic=deterministic)
     
     
     def q_values(self) -> torch.Tensor:
         """Assumes the correct distribution to be assembled; returns q-values as given by the network"""
         # sample using the current distribution
-        return self.config.action_manager.logits() # (B, E, L)
+        return self.action_manager.logits() # (B, E, L)
         
         
     def sample_action(self, deterministic: bool = False) -> torch.Tensor:
         """Assumes the distribution to be assembled; returns the action index"""
-        return self.config.action_manager.sample_action(deterministic) # (B, E, A)
+        return self.action_manager.sample(deterministic=deterministic) # (B, E, A)
     
     
     def entropy(self) -> torch.Tensor:
-        return self.config.action_manager.entropy() # (B, E)
+        return self.action_manager.entropy() # (B, E)
     
     
     def log_prob(self, action: torch.Tensor) -> torch.Tensor:
-        return self.config.action_manager.log_prob(action) # (B, E, A)
+        return self.action_manager.log_prob(action) # (B, E, A)
     
     
     
@@ -118,15 +125,21 @@ class DQNConfig:
     net: nn.Module
     # all raw logits pass through the action manager, then are divided into distributions specified by ActionTerms
     # and are recombined into action values, entropy, or lob probs
-    action_manager: ActionManager
+    action_config: ActionConfig
+    
+    
+    
+@dataclass
+class DQNTrainerConfig:
+    # environment must follow gymnasium convention
+    # step(action) -> (obs, reward, term, trunc, info)
+    # reset(seed=None) -> (obs, info)
+    environment: object
     
     # gradient update fields
     op: optim.Optimizer
     loss_fn: Callable = msbe
     loss_params: dict[str, Any] = field(default_factory=dict)
-    
-    # enables exploration in the dqn; policy with a probability of epsilon selects a random action
-    epsilon_fn: DynamicTerm | float = 0.05
     
     # number of warmup steps
     warmup: int = 8_000

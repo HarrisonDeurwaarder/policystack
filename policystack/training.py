@@ -62,10 +62,10 @@ class OnPolicyACTrainer(ABC):
     
     The training loop is standardized across mainstream on-policy AC algorithms, and trainers should only need to implement abstract methods
     """
-    def __init__(self, config, algorithm: nn.Module, state: TrainingState) -> None:
+    def __init__(self, config, algorithm: nn.Module) -> None:
         self.config = config
         self.algorithm = algorithm
-        self.state = state
+        self.state = config.state
         
         
     @abstractmethod
@@ -135,10 +135,10 @@ class OnPolicyACTrainer(ABC):
                     
                     
 class ValueBasedTrainer(ABC):
-    def __init__(self, config, algorithm: nn.Module, state: TrainingState) -> None:
+    def __init__(self, config, algorithm: nn.Module) -> None:
         self.config = config
         self.algorithm = algorithm
-        self.state = state
+        self.state = config.state
         
         
     @abstractmethod

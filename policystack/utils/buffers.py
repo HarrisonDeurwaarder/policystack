@@ -21,7 +21,7 @@ class TransitionBuffer(ABC):
         self.field_names = fields
         self.fields = dict()
         self.length = length
-        self.populated = False
+        self.reset()
         
         
     @abstractmethod
@@ -30,11 +30,17 @@ class TransitionBuffer(ABC):
         
     
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        # enforce integer keys
+        if not isinstance(idx, int):
+            raise ValueError(f"Expected idx to be of datatype 'str', got '{type(idx)}'")
         return {field: self.fields[field][..., idx] for field in self.field_names}
         
     
     def __getattr__(self, name: str) -> torch.Tensor:
-        return self.fields[name]
+        if name in self.fields.keys():
+            return self.fields[name]
+        else:
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
         
     
     def reset(self) -> None:
@@ -73,6 +79,7 @@ class TransitionBuffer(ABC):
         # resolve field shapes if unpopulated
         if not self.populated:
             self.populate({field: fields[field].shape for field in fields})
+            self.populated = True
             
         for field in self.field_names:
             self.fields[field][..., self.index] = fields[field] # copy the reference from the passed transition

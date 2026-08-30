@@ -42,7 +42,7 @@ def gae(
     adv_dims[-1] += 1 # an additional dimension is added to ease code complexity
     advantages = torch.zeros(adv_dims)
     for t in range(rewards.size(-1) - 1, -1, -1): # iterate backwards from T to 0, inclusive
-        advantages[..., t] = td_res[..., t] + resolve(discount_factor) * resolve(gae_decay) * advantages[..., t+1]
+        advantages[..., t] = td_res[..., t] + resolve(discount_factor) * resolve(gae_decay) * advantages[..., t+1] * (1 - dones[..., t])
         
     return advantages[..., :-1]
 
@@ -105,5 +105,5 @@ def monte_carlo(
     for t in range(rewards.size(-1) - 1, -1, -1):
         returns[..., t] = rewards[..., t] + resolve(discount_factor) * returns[..., t+1] * (1 - dones[..., t])
     # then compute the difference
-    advantages = returns - values
-    return advantages[..., :-1]
+    advantages = returns[..., :-1] - values
+    return advantages
