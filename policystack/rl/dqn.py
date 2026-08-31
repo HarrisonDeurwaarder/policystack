@@ -9,9 +9,10 @@ import copy
 
 from policystack.utils.buffers import Replay
 from policystack.utils.config import DynamicTerm
-from policystack.training import ValueBasedTrainer
+from policystack.training import ValueBasedTrainer, TrainingContext
 from policystack.managers.actions import ActionManager
 from policystack.math.objective import msbe
+from policystack.rl.base import RLAlgorithm
 
 from dataclasses import dataclass, field
 from typing import Callable, Any
@@ -20,17 +21,11 @@ if TYPE_CHECKING:
     from managers.actions import ActionConfig
 
 
-class DQN(nn.Module):
+class DQN(RLAlgorithm):
     
     def __init__(self, config: DQNConfig) -> None:
         super().__init__()
-        self.config = config
         self.net = config.net
-        self.action_manager = ActionManager(config.action_config)
-        
-    
-    def __call__(self, obs: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
-        return super().__call__(obs, deterministic)
         
         
     def forward(self, obs: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
@@ -46,23 +41,11 @@ class DQN(nn.Module):
         """Assumes the correct distribution to be assembled; returns q-values as given by the network"""
         # sample using the current distribution
         return self.action_manager.logits() # (B, E, L)
-        
-        
-    def sample_action(self, deterministic: bool = False) -> torch.Tensor:
-        """Assumes the distribution to be assembled; returns the action index"""
-        return self.action_manager.sample(deterministic=deterministic) # (B, E, A)
-    
-    
-    def entropy(self) -> torch.Tensor:
-        return self.action_manager.entropy() # (B, E)
-    
-    
-    def log_prob(self, action: torch.Tensor) -> torch.Tensor:
-        return self.action_manager.log_prob(action) # (B, E, A)
     
     
     
 class DQNTrainer(ValueBasedTrainer):
+    
     def _pre_training(self) -> None:
         # instantiate replay buffer
         self.replay = Replay(["obs", "next_obs", "q_values", "rewards", "dones"], length=self.config.buffer_size)
@@ -71,14 +54,18 @@ class DQNTrainer(ValueBasedTrainer):
         
         # collect preliminary samples
         # no policy refinement
-        while len(self.replay) < self.config.warmup:
+        for i in range(self.config.warmup):
             self._collect_transitions()
         # establish target policy
         self._update_frozen_policy()
         
         
+    def _pre_collection(self): self.context.clear()
+        
+        
     def _collect_transitions(self) -> None:
-        idx = self.algorithm(self.replay.staged["obs"])
+        obs = self.replay.staged["obs"]
+        idx = self.algorithm(obs)
         # index q-value
         # usable q-values must not have exploration applied
         action_qval = self.algorithm.q_values()[..., idx]
@@ -87,9 +74,19 @@ class DQNTrainer(ValueBasedTrainer):
         self.replay.stage(
             {"next_obs": next_obs, "q_values": action_qval, "rewards": reward, "dones": term | trunc}
         )
+        
+        self.context.write(
+            obs=obs, action_idx=idx,
+            training_q_values=self.algorithm.q_values(),
+            rewards=reward
+        )
+        
         self.replay.commit()
         # restage next obs for subsequent step
         self.replay.stage({"obs": next_obs})
+        
+        
+    def _pre_learning(self): self.context.clear()
         
         
     def _gradient_update(self, batch: dict[str, torch.Tensor]) -> None:
@@ -102,18 +99,26 @@ class DQNTrainer(ValueBasedTrainer):
         self.target_policy(batch["next_obs"])
         loss = self.config.loss_fn(
             reward=batch["rewards"],
-            value=batch["q_values"],
+            value=batch["q_values"][..., idx],
             next_value=next_qval,
             done=batch["dones"],
             **self.config.loss_params,
         )
         loss.backward()
+        
+        self.context.write(grad_norm=nn.utils.clip_grad_norm_(self.algorithm.policy.parameters(), max_norm=float("inf")))
+        
         self.config.op.step()
+        
+        self.context.write(
+            training_q_values=batch["q_values"], action_idx=idx,
+            target_next_q_values=next_qval,      loss=loss
+        )
         
         
     def _update_frozen_policy(self) -> None:
         # update at frequency
-        if self.state.learning_steps % self.config.target_update_interval == 0:
+        if self.context.num_updates % self.config.target_update_interval == 0:
             self.target_policy = copy.deepcopy(self.algorithm) # algorithm is a shell for the net argument's parameters
             # set for eval only
             self.target_policy.eval()
@@ -131,13 +136,16 @@ class DQNConfig:
     
 @dataclass
 class DQNTrainerConfig:
+    
+    op: optim.Optimizer
     # environment must follow gymnasium convention
     # step(action) -> (obs, reward, term, trunc, info)
     # reset(seed=None) -> (obs, info)
     environment: object
     
+    context: TrainingContext = TrainingContext(["global_step", "iteration", "num_updates", "epoch", "elapsed_time", "grad_norm", "obs", "action_idx", "rewards", "training_q_values", "target_next_q_values", "loss"])
+    
     # gradient update fields
-    op: optim.Optimizer
     loss_fn: Callable = msbe
     loss_params: dict[str, Any] = field(default_factory=dict)
     

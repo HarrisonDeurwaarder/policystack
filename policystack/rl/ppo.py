@@ -1,61 +1,43 @@
 from __future__ import annotations
 from typing import Tuple, Any, Callable, TYPE_CHECKING
 
+from policystack.utils.config import DynamicTerm, resolve
+from policystack.utils.buffers import Rollout
+from policystack.math.advantage import gae
+from policystack.math.objective import clipped_surrogate_with_entropy, critic_mse
+from policystack.training import OnPolicyACTrainer, TrainingContext
+from policystack.managers.actions import ActionManager
+from policystack.rl.base import RLAlgorithm
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Normal, Categorical
 from torch.utils.data import DataLoader
 
-from policystack.utils.config import DynamicTerm, resolve
-from policystack.utils.buffers import Rollout
-from policystack.math.advantage import gae
-from policystack.math.objective import clipped_surrogate_with_entropy, critic_mse
-from policystack.training import TrainingState, OnPolicyACTrainer
-
 from typing import Tuple, Any, Callable
 from dataclasses import dataclass, field, MISSING
-from policystack.managers.actions import ActionManager
 
 if TYPE_CHECKING:
     from policystack.managers.actions import ActionConfig
 
 
-class PPO(nn.Module):
+class PPO():
     """
     Proximal policy optimization algorithm
     """
     def __init__(self, config: PPOConfig) -> None:
-        super().__init__()
-        self.config = config
+        super().__init__(config)
         self.policy = config.actor
         self.value = config.critic
-        self.action_manager = ActionManager(config.action_config)
-        
-    
-    def __call__(self, obs: torch.Tensor, deterministic: bool = False) -> tuple[torch.Tensor, Normal]:
-        return super().__call__(obs, deterministic)
     
     
     def forward(self, obs: torch.Tensor, deterministic: bool = False) -> Normal:
         out = self.policy(obs) # (B, E, logits)
         # make the action distributions
-        self.action_manager.make_dists(out)
+        self.from_logits(out)
         # return a sampled action
         return self.sample_action(deterministic=deterministic)
-        
-        
-    def sample_action(self, deterministic: bool = False) -> torch.Tensor:
-        # sample using the current distribution
-        return self.action_manager.sample(deterministic=deterministic)
-    
-    
-    def entropy(self) -> torch.Tensor:
-        return self.action_manager.entropy()
-    
-    
-    def log_prob(self, action: torch.Tensor) -> torch.Tensor:
-        return self.action_manager.log_prob(action)
     
     
     def get_value(self, obs: torch.Tensor) -> torch.Tensor:
@@ -68,43 +50,52 @@ class PPOTrainer(OnPolicyACTrainer):
     """
     high-level ppo training handler
     """
+    
     def _pre_training(self) -> None:
         # instantiate rollout
-        self.rollout = Rollout(["obs", "actions", "log_probs", "rewards", "values", "next_values", "dones", "entropy"], length=self.config.rollout_length)
+        self.rollout = Rollout(["obs", "actions", "log_probs", "rewards", "values", "next_values", "dones"], length=self.config.rollout_length)
+        # logging
         
         
     def _pre_collection(self) -> None:
         obs, _ = self.env.reset()
         value = self.algorithm.get_value(obs)
         self.rollout.reset()
-        self.rollout.stage(fields={"obs": obs, "values": value})
+        self.rollout.stage(fields={"obs": obs, "values": value.detach()})
+        self.context.clear()
         
         
     def _collect_transition(self) -> None:
         # compute and sample action
         obs = self.rollout.from_staged("obs")
-        action = self.algorithm(obs) # register logits
-        log_prob = self.algorithm.log_prob(action)
-        # compute entropy for entropy term
-        entropy = self.algorithm.entropy()
+        value = self.rollout.from_staged("value")
+        action = self.algorithm(obs).detach() # register logits
+        log_prob = self.algorithm.log_prob(action).detach()
         
         next_obs, reward, term, trunc, _ = self.env.step(action)
         # compute critic value for next state
-        next_value = self.algorithm.get_value(next_obs)
+        next_value = self.algorithm.get_value(next_obs).detach()
         done = term | trunc
         # compute the next expected value for advantage comps
         # log transition
         self.rollout.stage(fields={
             "actions": action, "log_probs": log_prob, 
-            "rewards": reward, "next_values": next_value, 
-            "dones": done, "entropy": entropy
+            "rewards": reward, "next_values": next_value.detach(), 
+            "dones": done
         })
+        
+        self.context.write(
+            obs=obs,        actions=action,
+            rewards=reward, values=value,
+            dones=done,     target_log_probs=log_prob
+        )
+        
         # obs have already been added; by staging everything else, we now have a full transition
         self.rollout.commit()
         # stage the obs for the next cycle
         # as a result, an additional obs remains in the buffer after collection
         # this is eliminated when rollout.reset() is called
-        self.rollout.stage(fields={"obs": next_obs, "values": next_value})
+        self.rollout.stage(fields={"obs": next_obs, "values": next_value.detach()})
         
         
     def _pre_learning(self) -> None:
@@ -116,7 +107,9 @@ class PPOTrainer(OnPolicyACTrainer):
             dones=self.rollout.dones, 
             **self.config.advantage_params,
         )
-        self.rollout.annotate("advantages", advantages)
+        self.rollout.annotate("advantages", advantages.detach())
+        
+        self.context.clear()
         
     
     def _gradient_update(self, batch):
@@ -124,15 +117,21 @@ class PPOTrainer(OnPolicyACTrainer):
         self.config.actor_op.zero_grad()
         # compute current distributions
         _ = self.algorithm(batch["obs"])
+        entropy = self.algorithm.entropy()
         log_probs = self.algorithm.log_prob(batch["actions"])
         act_loss = self.config.policy_objective_fn(
             log_prob=log_probs,
             old_log_prob=batch["log_probs"],
             advantage=batch["advantages"],
-            entropy=batch["entropy"],
+            entropy=entropy,
             **self.config.policy_objective_params,
         )
         act_loss.backward()
+        
+        self.context.write(
+            grad_norm=nn.utils.clip_grad_norm_(self.algorithm.policy.parameters(), max_norm=float("inf"))
+        )
+        
         self.config.actor_op.step()
         
         # update critic
@@ -147,6 +146,14 @@ class PPOTrainer(OnPolicyACTrainer):
         )
         crit_loss.backward()
         self.config.critic_op.step()
+        
+        self.context.write(
+            advantages=batch["advantages"], actions=batch["actions"],
+            entropy=entropy,                target_log_probs=batch["log_probs"],
+            training_log_probs=log_probs,   target_values=batch["values"],
+            training_values=values,         policy_loss=act_loss,
+            value_loss=crit_loss
+        )
 
 
 @dataclass
@@ -175,7 +182,13 @@ class PPOTrainerConfig:
     # reset(seed=None) -> (obs, info)
     environment: object
     
-    state: TrainingState = field(default_factory=TrainingState)
+    context: TrainingContext = TrainingContext([
+        "global_step", "iteration", "num_updates", "epoch", "elapsed_time", 
+        "obs", "actions", "rewards", "dones", 
+        "entropy", "target_log_probs", "training_log_prob", "target_values", 
+        "training_values", "grad_norm", "policy_loss", "value_loss", 
+        "advantages"
+    ])
     
     # number of times transitions from each rollout are iterated over
     epochs: int | DynamicTerm = 10
