@@ -18,7 +18,8 @@ class TransitionBuffer(ABC):
     ) -> None:
         # enforce persistent field names across resets
         # dims are inferred upon the first call of add()
-        self.field_names = fields
+        self.field_names = fields[:]
+        self.original_field_names = fields[:]
         self.fields = dict()
         self.length = length
         self.reset()
@@ -35,7 +36,7 @@ class TransitionBuffer(ABC):
             return {field: self.fields[field][..., idx] for field in self.field_names}
         elif isinstance(idx, str):
             # enforce key existence
-            if not idx in self.fields.keys():
+            if not idx in self.field_names:
                 raise KeyError(f"'{idx}'")
             return self.fields[idx]
         elif isinstance(idx, slice):
@@ -45,7 +46,7 @@ class TransitionBuffer(ABC):
         
     
     def __getattr__(self, name: str) -> torch.Tensor:
-        if name in self.fields.keys():
+        if name in self.field_names:
             return self.__getitem__(idx=name)
         else:
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
@@ -53,12 +54,16 @@ class TransitionBuffer(ABC):
     
     def reset(self) -> None:
         self.index = 0
+        # remove any annotated field names from the field_name list
+        self.field_names = self.original_field_names[:]
         # transition fields for one step may be staged at different points before being commited to the buffer
         self.staged = dict()
         self.populated = False
         
         
     def populate(self, field_dims: dict[str, torch.Size]) -> None:
+        # empty fields to expunge all residual annotated field names
+        self.fields = dict()
         for field, size in field_dims.items():
             # fields will generally be of shape (E, field_dims..., length)
             self.fields[field] = torch.zeros(size + torch.Size((self.length,)))
@@ -94,17 +99,20 @@ class TransitionBuffer(ABC):
         self.index += 1
             
     
-    def annotate(self, field_name: str, field: torch.Tensor) -> None:
+    def annotate(self, field_name: str, field: torch.Tensor, persistent: bool = False) -> None:
         """Annotate a new column to the buffer"""
         # verify that the correct batch dimensions and length exist
         if field.shape[-1] != self.__len__():
             raise ValueError(f"Expected field of trailing dimension {self.__len__()}, got {field.shape}")
         # verify that field does not already exist
-        if field_name in self.fields.keys():
-            raise ValueError(f"Field {field_name} is already in buffer ({list(self.fields.keys())})")
+        if field_name in self.field_names:
+            raise ValueError(f"Field {field_name} is already in buffer ({list(self.field_names)})")
         
         self.fields[field_name] = field
+        self.field_names.append(field_name)
         
+        # persistence defines whether or not the field will be expected after future resets
+        if persistent: self.original_field_names.append(self.field_names)
         
         
 class Replay(TransitionBuffer):

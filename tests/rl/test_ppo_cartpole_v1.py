@@ -65,3 +65,4 @@ def test_ppo():
     trainer = PPOTrainer(config=trainer_config, algorithm=ppo)
     
     trainer.train()
+    print(trainer.rollout.rewards.mean())
