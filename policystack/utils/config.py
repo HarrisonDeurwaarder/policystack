@@ -16,14 +16,25 @@ class DynamicTerm:
     Modifies configuration variables according to training context
     It is good practice to instantiate a DynamicTerm under a TrainingState object in order to avoid specifying the training state, and for clarity
     """
-    def __init__(self, callback: Callable, context: TrainingContext) -> None:
+    def __init__(self, callback: Callable, context: TrainingContext, name: str | None = None, compute_init_value: bool = True) -> None:
+        # resolve name
+        if name is None:
+            name = callback.__name__
+        # callback can not pull from dynamic terms because update order can not be guarenteed
         self.callback = callback
         self.ctx = context
+        self.name = name
+        # register the term inside context
+        self.context = context
+        context.register_dynamic_term(name=name, init_value=callable(context) if compute_init_value else None)
         
         
     def get(self) -> Any:
+        value = self.callback(self.ctx)
+        # send to context for registry
+        self.context.update_dynamic_term(name=self.name, value=callable(self.ctx))
         # several potential arguments 
-        return self.callback(self.ctx)
+        return value
     
     # the following return common callback functions for numerical terms
     

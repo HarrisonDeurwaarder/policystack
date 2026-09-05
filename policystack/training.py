@@ -22,39 +22,38 @@ class TrainingContext:
     _context: dict[str, Any]
     
     def __init__(self, labels: list[str] = ["iteration", "global_env_steps", "iteration_env_steps", "global_update_steps", "iteration_update_steps", "reward", "total_iterations", "total_env_steps", "elapsed_time"]) -> None:
-        self._labels = labels
+        self._context_labels, self._dynamic_term_labels = labels, list()
+        self._dynamic_terms: dict[str, Any] = dict()
         self.reset()
         
         
     def __repr__(self) -> str:
-        return f"TrainingContext(context={self._context})"
+        return f"TrainingContext(context={self._context}, dynamic_terms={self._dynamic_terms})"
         
     
     def __getitem__(self, key: str) -> Any:
         self._update_timer()
         # enforce key as element of labels
-        if not key in self.content.keys():
+        if not key in self._context.keys():
             raise KeyError(f"'{key}'")
         return self._context[key]
     
     
     def __setitem__(self, key: str, value: Any) -> None:
-        self._update_timer()
         # enforce key as element of labels
-        if not key in self.content.keys():
+        if not key in self._context.keys():
             raise KeyError(f"'{key}'")
         self._context[key] = value
         
         
     def __contains__(self, key: str):
-        self._update_timer()
         # operates to determine whether a label has an associated value
         return not self._context[key] is None
     
     
     def clear(self) -> None:
         # reset is called at init and periodically in an algorithm as to avoid conflating metrics from different training stages
-        self._context = {label: None for label in self._labels}
+        self._context = {label: None for label in self._context_labels}
     
     
     def write(self, enforce_presence: bool = False, **ctx: Any) -> None:
@@ -76,17 +75,37 @@ class TrainingContext:
         # resolve labels
         if labels is None:
             return self._context
-        # iteratively read content
+        # iteratively read context
         content = dict()
-        for key in labels:
+        """Assemble content values and dynamic terms"""
+        for key in self._context | self._dynamic_terms:
             # key exists => return in content
-            if key in self._context.keys():
+            if key in self._context_labels:
                 content[key] = self._context[key]
+            elif key in self._dynamic_term_labels:
+                content[key] = self._dynamic_terms[key]
             # key doesn't exist + enforce => raise
             elif enforce_presence:
                 raise KeyError(f"'{key}'")
         
         return content.values()[0] if len(content.keys()) == 1 else content # return a singular value if appropriate
+    
+    
+    def register_dynamic_term(self, name: str, init_value: Any) -> None:
+        # this method is only called during DynamicTerm initialization
+        # verify absense
+        if name in self._context_labels:
+            raise ValueError(f"Key '{name}' already exists as a general context or DynamicTerm label. Consider renaming or specifying a name to prevent repetitions")
+        # save the dynamic terms seperately from other context
+        self._dynamic_terms[name] = init_value
+        self._dynamic_term_labels.append(name)
+        
+        
+    def update_dynamic_term(self, name: str, value: Any) -> None:
+        # functionally distinguishable from register_dynamic_term() only by key presence requirement
+        if self._dynamic_terms.get(name) is None:
+            raise KeyError(f"Expected '{name}' to be a registered DynamicTerm")
+        self._dynamic_terms[name] = value
         
             
     def initialize_timer(self) -> None:
